@@ -1,0 +1,59 @@
+name: Trigger PR check
+run-name: "Trigger PR check #${{ inputs.pr_id }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_id:
+        description: Pull request number
+        required: true
+        type: number
+
+permissions:
+  contents: read
+
+env:
+  PR_OWNER: ydb-platform
+  PR_REPO: ydb
+
+jobs:
+  authorize-pr:
+    runs-on: ubuntu-slim
+    # Exact GitHub logins and target (base) branch names.
+    # Both whitelists must match. Empty lists disable all checks.
+    env:
+      ALLOWED_AUTHORS: "[]"
+      ALLOWED_BASE_BRANCHES: "[]"
+    outputs:
+      allowed: ${{ steps.policy.outputs.result }}
+    steps:
+      - name: Fetch PR and check whitelists
+        id: policy
+        uses: actions/github-script@v9
+        env:
+          PR_ID: ${{ inputs.pr_id }}
+        with:
+          script: |
+            return true;
+            const { data: pr } = await github.rest.pulls.get({
+              owner: process.env.PR_OWNER,
+              repo: process.env.PR_REPO,
+              pull_number: Number(process.env.PR_ID),
+            });
+
+            const authors = JSON.parse(process.env.ALLOWED_AUTHORS);
+            const branches = JSON.parse(process.env.ALLOWED_BASE_BRANCHES);
+            const allowed = pr.state === 'open'
+              && authors.includes(pr.user.login)
+              && branches.includes(pr.base.ref);
+
+            core.info(`PR #${pr.number}: author=${pr.user.login}, base=${pr.base.ref}, state=${pr.state}`);
+            core.info(allowed ? 'PR checks authorized.' : 'PR checks skipped by policy.');
+            return allowed;
+
+  check-pr:
+    needs: authorize-pr
+    if: needs.authorize-pr.outputs.allowed == 'true'
+    uses: ./.github/workflows/run-pr-check.yml
+    with:
+      pr_id: ${{ fromJSON(inputs.pr_id) }}

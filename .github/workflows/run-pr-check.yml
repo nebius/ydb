@@ -1,0 +1,103 @@
+name: Run PR check
+
+on:
+  workflow_call:
+    inputs:
+      pr_id:
+        description: Pull request number in ydb-platform/ydb
+        required: true
+        type: number
+
+permissions:
+  contents: read
+
+env:
+  PR_OWNER: ydb-platform
+  PR_REPO: ydb
+
+jobs:
+  check:
+    name: Check PR (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: [self-hosted, linux, arm64-large]
+          # - arch: x64
+          #   runner: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 360
+    defaults:
+      run:
+        shell: bash
+    env:
+      PR_ID: ${{ inputs.pr_id }}
+      BUILD_ARCH: ${{ matrix.arch }}
+      BUILD_PRESET: relwithdebinfo
+      BUILD_TARGET: ydb/
+      TEST_SIZES: small medium
+      SOURCE_DIR: ${{ github.workspace }}/ydb
+      RESULTS_DIR: ${{ github.workspace }}/pr-check/results
+      YA_OUT_DIR: ${{ github.workspace }}/pr-check/out
+      ARTIFACT_NAME: pr-${{ inputs.pr_id }}-${{ matrix.arch }}-build
+    steps:
+      - name: Checkout CI scripts
+        uses: actions/checkout@v7
+        with:
+          path: ci
+          persist-credentials: false
+
+      - name: Check PR mergeability
+        id: merge
+        uses: actions/github-script@v9
+        with:
+          script: |
+            for (let attempt = 1; attempt <= 60; attempt++) {
+              const { data: pr } = await github.rest.pulls.get({
+                owner: process.env.PR_OWNER, repo: process.env.PR_REPO,
+                pull_number: Number(process.env.PR_ID),
+              });
+              core.setOutput('base_sha', pr.base.sha);
+              core.setOutput('pr_head_sha', pr.head.sha);
+              core.info(`Mergeability attempt ${attempt}/60: ${pr.mergeable}`);
+              if (pr.state !== 'open') return core.setFailed('PR is not open.');
+              if (pr.mergeable === false) return core.setFailed('Merge conflict detected. Rebase or merge the target branch into the PR.');
+              if (pr.mergeable === true) {
+                core.setOutput('merge_sha', pr.merge_commit_sha);
+                return;
+              }
+              if (attempt < 60) await new Promise(resolve => setTimeout(resolve, 5000));
+            }
+            core.setFailed('Unable to resolve PR mergeability/merge commit SHA. Re-run the check.');
+
+      - name: Checkout YDB PR merge commit
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ format('{0}/{1}', env.PR_OWNER, env.PR_REPO) }}
+          ref: ${{ steps.merge.outputs.merge_sha }}
+          path: ydb
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Build and test with ya
+        id: build
+        run: bash ci/.github/scripts/pr-check/build.sh
+
+      - name: Generate build summary
+        if: always()
+        env:
+          BUILD_OUTCOME: ${{ steps.build.outcome }}
+          MERGE_OUTCOME: ${{ steps.merge.outcome }}
+          BASE_SHA: ${{ steps.merge.outputs.base_sha }}
+          PR_HEAD_SHA: ${{ steps.merge.outputs.pr_head_sha }}
+        run: bash ci/.github/scripts/pr-check/summary.sh
+
+      - name: Upload build logs and report
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: ${{ env.RESULTS_DIR }}
+          if-no-files-found: warn
+          retention-days: 7
