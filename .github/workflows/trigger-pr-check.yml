@@ -8,9 +8,31 @@ on:
         description: Pull request number
         required: true
         type: number
+      target:
+        description: Build/test target (or space-separated targets)
+        type: string
+        required: true
+        default: ydb/
+      x86:
+        description: Build and test on x86_64
+        type: boolean
+        default: true
+      arm64:
+        description: Build and test on ARM64
+        type: boolean
+        default: true
+      incremental:
+        description: Run only tests affected by graph changes
+        type: boolean
+        default: false
+      put_to_cache:
+        description: Upload build results to remote cache
+        type: boolean
+        default: true
 
 permissions:
   contents: read
+  actions: read
 
 env:
   PR_OWNER: ydb-platform
@@ -32,8 +54,14 @@ jobs:
         uses: actions/github-script@v9
         env:
           PR_ID: ${{ inputs.pr_id }}
+          RUN_X86: ${{ inputs.x86 }}
+          RUN_ARM64: ${{ inputs.arm64 }}
         with:
           script: |
+            if (process.env.RUN_X86 !== 'true' && process.env.RUN_ARM64 !== 'true') {
+              core.setFailed('Select at least one architecture: x86 or arm64.');
+              return false;
+            }
             return true;
             const { data: pr } = await github.rest.pulls.get({
               owner: process.env.PR_OWNER,
@@ -55,5 +83,11 @@ jobs:
     needs: authorize-pr
     if: needs.authorize-pr.outputs.allowed == 'true'
     uses: ./.github/workflows/run-pr-check.yml
+    secrets: inherit
     with:
       pr_id: ${{ fromJSON(inputs.pr_id) }}
+      target: ${{ inputs.target }}
+      x86: ${{ inputs.x86 }}
+      arm64: ${{ inputs.arm64 }}
+      incremental: ${{ inputs.incremental }}
+      put_to_cache: ${{ inputs.put_to_cache }}

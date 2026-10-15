@@ -1,0 +1,4 @@
+ydb[yc]==3.33.2
+Jinja2==3.1.6
+PyGithub==2.10.0
+PyYAML==6.0.3

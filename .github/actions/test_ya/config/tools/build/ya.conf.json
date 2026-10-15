@@ -1,0 +1,42 @@
+{
+  "bottles": {
+    "ygdiff": {
+      "executable": {"ygdiff": ["ygdiff"]},
+      "formula": {"by_platform": {
+        "linux-x86_64": {"uri": "sbr:7218889821"},
+        "darwin-x86_64": {"uri": "sbr:7218889573"},
+        "darwin-arm64": {"uri": "sbr:7218889248"}
+      }}
+    },
+    "contexts_difference": {
+      "executable": {"contexts_difference": ["contexts_difference"]},
+      "formula": {"by_platform": {
+        "linux-x86_64": {"uri": "sbr:10812651277"},
+        "linux-aarch64": {"uri": "sbr:10812649149"},
+        "darwin-x86_64": {"uri": "sbr:10812647031"},
+        "darwin-arm64": {"uri": "sbr:10812644944"}
+      }}
+    }
+  },
+  "toolchain": {
+    "ygdiff": {
+      "platforms": [
+        {"default": true, "host": {"os": "LINUX"}},
+        {"default": true, "host": {"os": "DARWIN"}}
+      ],
+      "tools": {"ygdiff": {"bottle": "ygdiff", "executable": "ygdiff"}}
+    },
+    "contexts_difference": {
+      "platforms": [
+        {"default": true, "host": {"os": "LINUX"}},
+        {"default": true, "host": {"os": "DARWIN"}}
+      ],
+      "tools": {"contexts_difference": {"bottle": "contexts_difference", "executable": "contexts_difference"}}
+    }
+  },
+  "toolchain_aliases": {},
+  "tools": {
+    "ygdiff": {"description": "Pinned upstream graph comparison tool", "visible": false},
+    "contexts_difference": {"description": "Pinned upstream context comparison tool", "visible": false}
+  }
+}

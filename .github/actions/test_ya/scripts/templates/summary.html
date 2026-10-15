@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ya test results</title>
+<style>
+body { font: 15px system-ui, sans-serif; margin: 2rem; }
+table { border-collapse: collapse; width: 100%; }
+th, td { text-align: left; padding: .5rem; border-bottom: 1px solid #ddd; vertical-align: top; }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 30rem; overflow: auto; }
+a { margin-right: .5rem; }
+.FAIL, .ERROR { color: #b42318; } .MUTE, .SKIP { color: #8a6100; } .PASS { color: #067647; }
+</style>
+</head>
+<body>
+<h1>Ya test results</h1>
+<p>{{ build_preset }} · {{ branch }} · {{ commit_sha }}</p>
+<nav>
+{% if pr_url %}<a href="{{ pr_url }}">Original PR</a>{% endif %}
+{% if workflow_url %}<a href="{{ workflow_url }}">Workflow run</a>{% endif %}
+{% for status in status_order %}<a href="#{{ status.name }}">{{ status.name }} ({{ tests[status]|length }})</a>{% endfor %}
+</nav>
+{% for status in status_order %}
+<section id="{{ status.name }}">
+<h2 class="{{ status.name }}">{{ status.name }} ({{ tests[status]|length }})</h2>
+{% if tests[status] %}
+<table>
+<thead><tr><th>Test</th><th>Duration</th><th>Logs / failure details</th></tr></thead>
+<tbody>
+{% for test in tests[status] %}
+<tr>
+<td>{{ test.full_name }}</td><td>{{ test.elapsed_display }}</td>
+<td>
+{% for title, url in test.log_urls.items() %}
+{% if url|safe_link %}<a href="{{ url|safe_link }}">{{ title }}</a>{% endif %}
+{% endfor %}
+{% if test.error_type %}<p>{{ test.error_type }}</p>{% endif %}
+{% if test.status_description %}<details><summary>Details</summary><pre>{{ test.status_description }}</pre></details>{% endif %}
+</td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+{% endif %}
+</section>
+{% endfor %}
+</body>
+</html>

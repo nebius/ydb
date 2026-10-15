@@ -71,14 +71,6 @@ if [[ ${#targets[@]} -eq 0 ]]; then
     exit 1
 fi
 
-# Override the aarch64 test_tool resource with our public mirror.
-mapping=build/ext_mapping.conf.json
-jq '
-    .resources["12765027005"] = "https://ydb-nebius-ci-public-609722444123-us-east-1.s3.us-east-1.amazonaws.com/resources/test_tool-aarch64.tar.gz" |
-    .resources_descriptions["12765027005"].file_name = "test_tool"
-' "$mapping" >"$mapping.tmp"
-mv "$mapping.tmp" "$mapping"
-
 ./ya --version 2>&1 | tee "$RESULTS_DIR/ya-version.txt"
 command=(
     ./ya make "${params[@]}" "${targets[@]}"

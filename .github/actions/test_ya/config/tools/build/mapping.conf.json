@@ -1,0 +1,16 @@
+{
+  "bottles": {},
+  "extensions": {"registry_endpoint": "https://devtools-registry.s3.yandex.net"},
+  "resources": {
+    "7218889821": "{registry_endpoint}/7218889821",
+    "7218889573": "{registry_endpoint}/7218889573",
+    "7218889248": "{registry_endpoint}/7218889248",
+    "10812651277": "{registry_endpoint}/10812651277",
+    "10812649149": "{registry_endpoint}/10812649149",
+    "10812647031": "{registry_endpoint}/10812647031",
+    "10812644944": "{registry_endpoint}/10812644944"
+  },
+  "resources_descriptions": {},
+  "resources_info": {},
+  "tasks": {}
+}

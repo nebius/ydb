@@ -1,0 +1,144 @@
+name: Run build and tests (ya make)
+description: Pinned upstream build/test tooling without analytics or YDB uploads
+# Actions, helpers and mute rules are based on ydb-platform/ydb
+# 733f91d00184819527ea7aa32d76efd7117d5c7b, independent of the tested branch.
+inputs:
+  source_dir:
+    description: Absolute path to the YDB checkout
+    default: '.'
+  source_repository:
+    description: Repository containing the PR; empty uses workflow repository
+  head_sha:
+    description: PR head SHA for statuses
+  base_sha:
+    description: Base SHA for graph comparison; empty uses first parent
+  source_github_token:
+    description: Token for source repository comments and statuses
+  post_comments:
+    description: Enable source PR comments
+    default: 'false'
+  post_statuses:
+    description: Enable source commit statuses
+    default: 'false'
+  status_context_prefix:
+    description: Namespace for source commit statuses
+    default: nebius-ci/
+  build_target:
+    required: true
+    description: Build/test targets
+  build_preset:
+    description: Build preset
+    default: relwithdebinfo
+  test_type:
+    description: Comma-separated test types; empty selects all
+  test_size:
+    description: Comma-separated test sizes
+    default: small,medium
+  test_threads:
+    description: Test threads; empty uses nproc
+  link_threads:
+    description: Link threads; empty uses max(1, nproc / 4)
+  additional_ya_make_args:
+    description: Additional arguments, parsed with shlex (no shell evaluation)
+  increment:
+    description: Compare graphs and run affected tests
+    default: 'false'
+  put_build_results_to_cache:
+    description: Upload build results to remote cache
+    default: 'true'
+  bazel_remote_uri:
+    description: Remote cache endpoint
+  bazel_remote_username:
+    description: Optional remote cache username; empty omits authentication flag
+  bazel_remote_password:
+    description: Optional remote cache password; empty omits password file and flag
+  run_tests:
+    description: Run tests
+    default: 'true'
+  test_tool_url:
+    description: Optional standalone test_tool binary URL; passed to ya as --test-tool-bin
+  test_retry_count:
+    description: Maximum attempts; empty uses 3 (1 for sanitizer builds)
+  custom_branch_name:
+    description: Target branch name for reports
+  add_vcs_info:
+    description: Add Git variables to the build
+    default: 'false'
+  collect_coredumps:
+    description: Collect coredumps on a dedicated 100G loop volume
+    default: 'true'
+  use_systemd:
+    description: Run ya in a systemd scope with a memory limit
+    default: 'true'
+  pull_number:
+    description: Source pull request number
+  mute_file:
+    description: Optional mute file override; otherwise use vendored preset rules
+  python_executable:
+    description: Python with dependencies preinstalled; empty creates a venv
+outputs:
+  success:
+    description: Build, tests, reporting and publication succeeded
+    value: ${{ steps.publish.outputs.success }}
+  status:
+    description: Overall status
+    value: ${{ steps.publish.outputs.status }}
+runs:
+  using: composite
+  steps:
+    - name: Init and install Python dependencies
+      id: init
+      shell: bash
+      env:
+        TEST_YA_ACTION_PATH: ${{ github.action_path }}
+        SOURCE_DIR: ${{ inputs.source_dir }}
+        SOURCE_REPOSITORY: ${{ inputs.source_repository || github.repository }}
+        SOURCE_HEAD_SHA: ${{ inputs.head_sha }}
+        SOURCE_BASE_SHA: ${{ inputs.base_sha }}
+        PR_NUMBER: ${{ inputs.pull_number }}
+        POST_PR_COMMENTS: ${{ inputs.post_comments }}
+        POST_STATUSES: ${{ inputs.post_statuses }}
+        STATUS_CONTEXT_PREFIX: ${{ inputs.status_context_prefix }}
+        SOURCE_GITHUB_TOKEN: ${{ inputs.source_github_token }}
+        BUILD_TARGET: ${{ inputs.build_target }}
+        BUILD_PRESET: ${{ inputs.build_preset }}
+        TEST_SIZES: ${{ inputs.test_size }}
+        TEST_TYPES: ${{ inputs.test_type }}
+        TEST_THREADS: ${{ inputs.test_threads }}
+        LINK_THREADS: ${{ inputs.link_threads }}
+        ADDITIONAL_YA_MAKE_ARGS: ${{ inputs.additional_ya_make_args }}
+        INCREMENT: ${{ inputs.increment }}
+        RUN_TESTS: ${{ inputs.run_tests }}
+        TEST_RETRY_COUNT: ${{ inputs.test_retry_count }}
+        TEST_TOOL_URL: ${{ inputs.test_tool_url }}
+        BASE_BRANCH: ${{ inputs.custom_branch_name }}
+        ADD_VCS_INFO: ${{ inputs.add_vcs_info }}
+        COLLECT_COREDUMPS: ${{ inputs.collect_coredumps }}
+        USE_SYSTEMD: ${{ inputs.use_systemd }}
+        REMOTE_CACHE_URI: ${{ inputs.bazel_remote_uri }}
+        REMOTE_CACHE_USERNAME: ${{ inputs.bazel_remote_username }}
+        REMOTE_CACHE_PASSWORD: ${{ inputs.bazel_remote_password }}
+        PUT_BUILD_RESULTS_TO_CACHE: ${{ inputs.put_build_results_to_cache }}
+        MUTE_FILE: ${{ inputs.mute_file }}
+        CI_PYTHON: ${{ inputs.python_executable }}
+      run: bash "$TEST_YA_ACTION_PATH/init.sh"
+
+    - name: ya build and test
+      id: build
+      shell: bash
+      env:
+        SOURCE_GITHUB_TOKEN: ${{ inputs.source_github_token || github.token }}
+      run: bash "$TEST_YA_ACTION_PATH/build.sh"
+
+    - name: Publish reports and final status
+      id: publish
+      if: always() && steps.init.outcome == 'success'
+      shell: bash
+      env:
+        SOURCE_GITHUB_TOKEN: ${{ inputs.source_github_token || github.token }}
+      run: bash "$TEST_YA_ACTION_PATH/finalize.sh"
+
+    - name: Cleanup coredump volume and cache credentials
+      if: always() && steps.init.outcome == 'success'
+      shell: bash
+      run: bash "$TEST_YA_ACTION_PATH/cleanup.sh"

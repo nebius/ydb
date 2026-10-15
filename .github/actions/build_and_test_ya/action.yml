@@ -1,0 +1,169 @@
+name: Ya-Build-and-Test
+description: Pinned YDB build/test helpers with explicit PR context and no analytics
+# Vendored from ydb-platform/ydb 733f91d00184819527ea7aa32d76efd7117d5c7b.
+inputs:
+  source_dir:
+    description: Absolute path to the YDB checkout
+    default: '.'
+  source_repository:
+    description: Repository containing the PR; empty uses the workflow repository
+  head_sha:
+    description: PR head SHA for commit statuses (not the tested merge SHA)
+  base_sha:
+    description: Base SHA for graph comparison; empty uses tested commit first parent
+  s3_public_acl:
+    description: Set public-read ACL on S3 objects; false uses bucket policy
+    default: 'false'
+  source_github_token:
+    description: Token for source repository comments and statuses
+  post_comments:
+    description: Post comments to the source PR
+    default: 'false'
+  post_statuses:
+    description: Post commit statuses to the source repository
+    default: 'false'
+  status_context_prefix:
+    description: Namespace for statuses; avoids overwriting upstream CI statuses
+    default: nebius-ci/
+  build_target:
+    default: 'ydb/'
+    description: Limit build and test to specific targets
+  build_preset:
+    default: relwithdebinfo
+    description: Build preset
+  run_build:
+    default: 'true'
+    description: Run build
+  run_tests:
+    default: 'true'
+    description: Run tests
+  test_threads:
+    default: ''
+    description: Test threads count
+  link_threads:
+    default: ''
+    description: Link threads count
+  test_size:
+    default: small,medium,large
+    description: Comma-separated test sizes
+  test_type:
+    default: ''
+    description: Comma-separated test types; empty selects all
+  increment:
+    required: true
+    description: Compare graphs and run affected tests
+  folder_prefix:
+    default: ya-
+    description: S3 artifact folder prefix
+  put_build_results_to_cache:
+    default: 'true'
+    description: Upload build results to remote cache
+  additional_ya_make_args:
+    default: ''
+    description: Additional ya make arguments
+  test_tool_url:
+    description: Optional standalone test_tool binary URL
+  test_retry_count:
+    default: ''
+    description: Number of test attempts
+  secs:
+    default: '{}'
+    description: JSON containing S3 and remote cache secrets
+  vars:
+    default: '{}'
+    description: JSON containing S3 and remote cache settings
+  custom_branch_name:
+    description: Target branch name for reports
+  add_vcs_info:
+    default: 'false'
+    description: Add Git variables to the build
+  collect_coredumps:
+    default: 'true'
+    description: Collect coredumps on a dedicated loop volume
+  use_systemd:
+    description: Run ya in a bounded systemd scope
+    default: 'true'
+  mute_file:
+    description: Optional mute rules override; otherwise use vendored rules
+  python_executable:
+    description: Optional Python with dependencies preinstalled
+  pull_number:
+    description: Source pull request number
+outputs:
+  success:
+    description: Build, tests and publication succeeded
+    value: ${{ steps.build.outputs.success }}
+  status:
+    description: Overall status
+    value: ${{ steps.build.outputs.status }}
+runs:
+  using: "composite"
+  steps:
+    - name: Prepare folder prefix
+      id: prepare_prefix
+      shell: bash
+      env:
+        CUSTOM_BRANCH_NAME: ${{ inputs.custom_branch_name }}
+      run: |
+        # Check if custom_branch_name is set and not empty
+        if [ -n "$CUSTOM_BRANCH_NAME" ]; then
+          # Extract and sanitize custom_branch_name
+          # Replace all unsupported characters with hyphens
+          SANITIZED_NAME="${CUSTOM_BRANCH_NAME//[^a-zA-Z0-9-]/-}"
+          # Optionally limit the length to, say, 50 characters
+          SANITIZED_NAME="${SANITIZED_NAME:0:50}"
+          # Assign the sanitized name to the folder_prefix
+          FOLDER_PREFIX="ya-${SANITIZED_NAME}-"
+        else
+          # If the branch name is not provided, use a default prefix
+          FOLDER_PREFIX='ya-'
+        fi
+        # Output the folder_prefix for use in subsequent steps
+        echo "folder_prefix=${FOLDER_PREFIX}" >> $GITHUB_ENV
+
+    - name: Prepare s3cmd
+      uses: ./.github/actions/s3cmd
+      with:
+        s3_bucket: ${{ fromJSON( inputs.vars ).AWS_BUCKET }}
+        s3_endpoint: ${{ fromJSON( inputs.vars ).AWS_ENDPOINT }}
+        s3_region: ${{ fromJSON( inputs.vars ).AWS_REGION || 'us-east-1' }}
+        public_acl: ${{ inputs.s3_public_acl }}
+        s3_key_id: ${{ fromJSON( inputs.secs ).AWS_KEY_ID }}
+        s3_key_secret: ${{ fromJSON( inputs.secs ).AWS_KEY_VALUE }}
+        folder_prefix: ${{ env.folder_prefix }}
+        build_preset: ${{ inputs.build_preset }}
+
+    - name: Run build and tests
+      id: build
+      uses: ./.github/actions/test_ya
+      with:
+        source_dir: ${{ inputs.source_dir }}
+        source_repository: ${{ inputs.source_repository }}
+        head_sha: ${{ inputs.head_sha }}
+        base_sha: ${{ inputs.base_sha }}
+        source_github_token: ${{ inputs.source_github_token }}
+        post_comments: ${{ inputs.post_comments }}
+        post_statuses: ${{ inputs.post_statuses }}
+        status_context_prefix: ${{ inputs.status_context_prefix }}
+        build_target: ${{ inputs.build_target }}
+        build_preset: ${{ inputs.build_preset }}
+        test_size: ${{ inputs.test_size }}
+        test_type: ${{ inputs.test_type }}
+        run_tests: ${{ inputs.run_tests }}
+        increment: ${{ inputs.increment }}
+        link_threads: ${{ inputs.link_threads }}
+        additional_ya_make_args: ${{ inputs.additional_ya_make_args }}
+        test_threads: ${{ inputs.test_threads }}
+        bazel_remote_uri: ${{  fromJSON( inputs.vars ).REMOTE_CACHE_URL || '' }}
+        bazel_remote_username: ${{ fromJSON( inputs.secs ).REMOTE_CACHE_USERNAME || '' }}
+        bazel_remote_password: ${{ fromJSON( inputs.secs ).REMOTE_CACHE_PASSWORD || '' }}
+        put_build_results_to_cache: ${{ inputs.put_build_results_to_cache }}
+        test_retry_count: ${{ inputs.test_retry_count }}
+        test_tool_url: ${{ inputs.test_tool_url }}
+        custom_branch_name: ${{ inputs.custom_branch_name }}
+        add_vcs_info: ${{ inputs.add_vcs_info }}
+        use_systemd: ${{ inputs.use_systemd }}
+        mute_file: ${{ inputs.mute_file }}
+        python_executable: ${{ inputs.python_executable }}
+        collect_coredumps: ${{ inputs.collect_coredumps != 'false' }}
+        pull_number: ${{ inputs.pull_number }}

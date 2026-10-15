@@ -7,9 +7,41 @@ on:
         description: Pull request number in ydb-platform/ydb
         required: true
         type: number
+      target:
+        description: Build/test target (or space-separated targets)
+        type: string
+        default: ydb/
+      x86:
+        description: Build and test on x86_64
+        type: boolean
+        default: true
+      arm64:
+        description: Build and test on ARM64
+        type: boolean
+        default: true
+      incremental:
+        description: Run only tests affected by graph changes
+        type: boolean
+        default: false
+      put_to_cache:
+        description: Upload build results to remote cache
+        type: boolean
+        default: true
+    secrets:
+      AWS_KEY_ID:
+        required: false
+      AWS_KEY_VALUE:
+        required: false
+      REMOTE_CACHE_USERNAME:
+        required: false
+      REMOTE_CACHE_PASSWORD:
+        required: false
+      GH_PERSONAL_ACCESS_TOKEN:
+        required: false
 
 permissions:
   contents: read
+  actions: read
 
 env:
   PR_OWNER: ydb-platform
@@ -21,11 +53,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - arch: arm64
-            runner: [self-hosted, linux, arm64-large]
-          # - arch: x64
-          #   runner: ubuntu-24.04
+        include: ${{ fromJSON(format('[{0}{1}{2}]',
+          inputs.x86 && '{"arch":"x64","runner":["self-hosted","linux","amd64-large"]}' || '',
+          inputs.x86 && inputs.arm64 && ',' || '',
+          inputs.arm64 && '{"arch":"arm64","runner":["self-hosted","linux","arm64-large"]}' || '')) }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 360
     defaults:
@@ -35,17 +66,15 @@ jobs:
       PR_ID: ${{ inputs.pr_id }}
       BUILD_ARCH: ${{ matrix.arch }}
       BUILD_PRESET: relwithdebinfo
-      BUILD_TARGET: ydb/
-      TEST_SIZES: small medium
+      BUILD_TARGET: ${{ inputs.target }}
+      TEST_SIZES: small,medium
       SOURCE_DIR: ${{ github.workspace }}/ydb
-      RESULTS_DIR: ${{ github.workspace }}/pr-check/results
-      YA_OUT_DIR: ${{ github.workspace }}/pr-check/out
+      RESULTS_DIR: ${{ github.workspace }}/ydb/tmp/results
       ARTIFACT_NAME: pr-${{ inputs.pr_id }}-${{ matrix.arch }}-build
     steps:
       - name: Checkout CI scripts
         uses: actions/checkout@v7
         with:
-          path: ci
           persist-credentials: false
 
       - name: Check PR mergeability
@@ -59,6 +88,7 @@ jobs:
                 pull_number: Number(process.env.PR_ID),
               });
               core.setOutput('base_sha', pr.base.sha);
+              core.setOutput('base_branch', pr.base.ref);
               core.setOutput('pr_head_sha', pr.head.sha);
               core.info(`Mergeability attempt ${attempt}/60: ${pr.mergeable}`);
               if (pr.state !== 'open') return core.setFailed('PR is not open.');
@@ -77,21 +107,45 @@ jobs:
           repository: ${{ format('{0}/{1}', env.PR_OWNER, env.PR_REPO) }}
           ref: ${{ steps.merge.outputs.merge_sha }}
           path: ydb
-          fetch-depth: 1
+          fetch-depth: 2
           persist-credentials: false
 
-      - name: Build and test with ya
-        id: build
-        run: bash ci/.github/scripts/pr-check/build.sh
+      - name: Prepare parallelism
+        id: prepare
+        run: bash .github/scripts/pr-check/prepare-source.sh
 
-      - name: Generate build summary
-        if: always()
-        env:
-          BUILD_OUTCOME: ${{ steps.build.outcome }}
-          MERGE_OUTCOME: ${{ steps.merge.outcome }}
-          BASE_SHA: ${{ steps.merge.outputs.base_sha }}
-          PR_HEAD_SHA: ${{ steps.merge.outputs.pr_head_sha }}
-        run: bash ci/.github/scripts/pr-check/summary.sh
+      - name: Build and test with upstream actions
+        id: build
+        uses: ./.github/actions/build_and_test_ya
+        with:
+          source_dir: ${{ env.SOURCE_DIR }}
+          source_repository: ${{ format('{0}/{1}', env.PR_OWNER, env.PR_REPO) }}
+          pull_number: ${{ inputs.pr_id }}
+          head_sha: ${{ steps.merge.outputs.pr_head_sha }}
+          base_sha: ${{ steps.merge.outputs.base_sha }}
+          custom_branch_name: ${{ steps.merge.outputs.base_branch }}
+          source_github_token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+          post_comments: ${{ vars.POST_UPSTREAM_COMMENTS == 'true' }}
+          post_statuses: ${{ vars.POST_UPSTREAM_STATUSES == 'true' }}
+          build_preset: ${{ env.BUILD_PRESET }}
+          build_target: ${{ env.BUILD_TARGET }}
+          increment: ${{ inputs.incremental }}
+          run_tests: "true"
+          test_size: ${{ env.TEST_SIZES }}
+          test_tool_url: ${{ matrix.arch == 'arm64' && 'https://ydb-nebius-ci-public-609722444123-us-east-1.s3.us-east-1.amazonaws.com/resources/13945856083' || '' }}
+          test_threads: ${{ steps.prepare.outputs.test_threads }}
+          link_threads: ${{ steps.prepare.outputs.link_threads }}
+          additional_ya_make_args: ${{ matrix.arch == 'arm64' && '-DMKQL_DISABLE_CODEGEN=1' || '' }}
+          collect_coredumps: "false"
+          put_build_results_to_cache: ${{ inputs.put_to_cache && vars.REMOTE_CACHE_URL_YA != '' }}
+          secs: >-
+            ${{ format('{{"AWS_KEY_ID":{0},"AWS_KEY_VALUE":{1},"REMOTE_CACHE_USERNAME":{2},"REMOTE_CACHE_PASSWORD":{3}}}',
+              toJSON(secrets.AWS_KEY_ID), toJSON(secrets.AWS_KEY_VALUE),
+              toJSON(secrets.REMOTE_CACHE_USERNAME), toJSON(secrets.REMOTE_CACHE_PASSWORD)) }}
+          vars: >-
+            ${{ format('{{"AWS_BUCKET":{0},"AWS_ENDPOINT":{1},"AWS_REGION":{2},"REMOTE_CACHE_URL":{3}}}',
+              toJSON(vars.AWS_BUCKET), toJSON(vars.AWS_ENDPOINT), toJSON(vars.AWS_REGION),
+              toJSON(vars.REMOTE_CACHE_URL_YA)) }}
 
       - name: Upload build logs and report
         if: always()
