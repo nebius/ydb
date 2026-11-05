@@ -86,6 +86,9 @@ jobs:
               "add_vcs_info": "false",
               # Mute/BI job_name when github.workflow is the thin host (e.g. Regression-run_Large).
               "analytics_job_name": "",
+              # Caller event/run for analytics pull naming (this host is always workflow_dispatch).
+              "source_event_name": "",
+              "source_run_id": "",
           }
           out = {k: as_str(k, d) for k, d in defaults.items()}
           if out["increment"].lower() in ("1", "true", "yes"):
@@ -143,6 +146,7 @@ jobs:
             echo "- **analytics branch:** \`${{ steps.ya.outputs.custom_branch_name }}\`"
             echo "- **analytics job:** \`${{ steps.ya.outputs.analytics_job_name }}\`"
             echo "- **pull number:** \`${{ steps.ya.outputs.pull_number }}\`"
+            echo "- **source event:** \`${{ steps.ya.outputs.source_event_name }}\` / \`${{ steps.ya.outputs.source_run_id }}\`"
             echo "- **preset:** \`${{ steps.ya.outputs.build_preset }}\`"
             echo "- **target:** \`${{ steps.ya.outputs.build_target }}\`"
             echo "- **runs_on:** \`${{ inputs.runs_on }}\`"
@@ -177,6 +181,8 @@ jobs:
           pull_number: ${{ steps.ya.outputs.pull_number }}
           add_vcs_info: ${{ steps.ya.outputs.add_vcs_info }}
           analytics_job_name: ${{ steps.ya.outputs.analytics_job_name }}
+          source_event_name: ${{ steps.ya.outputs.source_event_name }}
+          source_run_id: ${{ steps.ya.outputs.source_run_id }}
           enable_ydb_qa: false
           additional_ya_make_args: -DDEBUGINFO_LINES_ONLY ${{ steps.ya.outputs.additional_ya_make_args }} ${{ steps.ya.outputs.blacklist_file && format('--test-blacklist-path {0}', steps.ya.outputs.blacklist_file) || '' }}
           secs: >-
