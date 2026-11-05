@@ -78,7 +78,11 @@ jobs:
               "additional_ya_make_args": "",
               "put_build_results_to_cache": "true",
               "collect_coredumps": "false",
+              # Test-history / ya GIT_BRANCH (must NOT be the Nebius host ref).
               "custom_branch_name": "",
+              # PR attribution for analytics (workflow_dispatch has no github.event.number).
+              "pull_number": "",
+              "add_vcs_info": "false",
           }
           out = {k: as_str(k, d) for k, d in defaults.items()}
           if out["increment"].lower() in ("1", "true", "yes"):
@@ -86,7 +90,7 @@ jobs:
           if not out["custom_branch_name"]:
               print(
                   "::warning::job_inputs.custom_branch_name is empty; "
-                  "analytics may attribute this run to the wrong branch"
+                  "analytics may attribute this run to the Nebius host ref"
               )
 
           path = os.environ["GITHUB_OUTPUT"]
@@ -110,6 +114,7 @@ jobs:
             echo "- **platform repo:** \`ydb-platform/ydb\`"
             echo "- **code ref:** \`$code_ref\`"
             echo "- **analytics branch:** \`${{ steps.ya.outputs.custom_branch_name }}\`"
+            echo "- **pull number:** \`${{ steps.ya.outputs.pull_number }}\`"
             echo "- **preset:** \`${{ steps.ya.outputs.build_preset }}\`"
             echo "- **target:** \`${{ steps.ya.outputs.build_target }}\`"
             echo "- **runs_on:** \`${{ inputs.runs_on }}\`"
@@ -145,6 +150,8 @@ jobs:
           put_build_results_to_cache: ${{ steps.ya.outputs.put_build_results_to_cache }}
           collect_coredumps: ${{ steps.ya.outputs.collect_coredumps }}
           custom_branch_name: ${{ steps.ya.outputs.custom_branch_name }}
+          pull_number: ${{ steps.ya.outputs.pull_number }}
+          add_vcs_info: ${{ steps.ya.outputs.add_vcs_info }}
           additional_ya_make_args: -DDEBUGINFO_LINES_ONLY ${{ steps.ya.outputs.additional_ya_make_args }}
           secs: >-
             ${{ format('{{"AWS_KEY_ID":{0},"AWS_KEY_VALUE":{1},"REMOTE_CACHE_USERNAME":{2},"REMOTE_CACHE_PASSWORD":{3},"YDBOT_TELEGRAM_BOT_TOKEN":{4}}}',
