@@ -1,163 +1,93 @@
-# TEMPORARY PRE-MERGE SMOKE ONLY.
-# This file normally triggers Nebius PR checks (see .github/ci-remote/trigger-pr-check.orig.yml).
-# Until ci_remote_executor.yml is on the default branch, this registered workflow_dispatch
-# alias runs the same executor so we can smoke-test from Actions UI / API.
-# RESTORE from .github/ci-remote/trigger-pr-check.orig.yml before merging to nebius-ci.
-#
-# Thin Nebius host for platform CI ("set and forget").
-# Checkouts ydb-platform/ydb@code_ref and runs build_and_test_ya from THAT tree —
-# do not sync platform .github into this repo.
-name: CI remote executor (TEMP via trigger-pr-check)
+name: Trigger PR check
+run-name: "Trigger PR check #${{ inputs.pr_id }}"
 
 on:
   workflow_dispatch:
     inputs:
-      code_ref:
-        description: 'ydb-platform/ydb ref/SHA to checkout and test'
-        required: false
+      pr_id:
+        description: Pull request number
+        required: true
+        type: number
+      target:
+        description: Build/test target (or space-separated targets)
         type: string
-        default: 'main'
-      job_inputs:
-        description: 'JSON object of build_and_test_ya public params (no secrets)'
-        required: false
-        type: string
-        default: '{}'
-      runs_on:
-        description: 'JSON array of GitHub runs-on labels'
-        required: false
-        type: string
-        default: '["self-hosted","linux","amd64-large"]'
-
-concurrency:
-  # Keep under GitHub's 400-char limit (do not embed full job_inputs JSON).
-  group: ci-remote-executor-${{ inputs.code_ref || github.sha }}-${{ github.run_id }}
-  cancel-in-progress: false
+        required: true
+        default: ydb/
+      x86:
+        description: Build and test on x86_64
+        type: boolean
+        default: true
+      arm64:
+        description: Build and test on ARM64
+        type: boolean
+        default: true
+      incremental:
+        description: Run only tests affected by graph changes
+        type: boolean
+        default: false
+      put_to_cache:
+        description: Upload build results to remote cache
+        type: boolean
+        default: true
 
 permissions:
   contents: read
   actions: read
 
+env:
+  PR_OWNER: ydb-platform
+  PR_REPO: ydb
+
 jobs:
-  execute:
-    name: build_and_test_ya · ${{ inputs.code_ref }}
-    runs-on: ${{ fromJSON(inputs.runs_on) }}
-    timeout-minutes: 1200
+  authorize-pr:
+    runs-on: ubuntu-slim
+    # Exact GitHub logins and target (base) branch names.
+    # Both whitelists must match. Empty lists disable all checks.
+    env:
+      ALLOWED_AUTHORS: "[]"
+      ALLOWED_BASE_BRANCHES: "[]"
+    outputs:
+      allowed: ${{ steps.policy.outputs.result }}
     steps:
-      - name: Parse job_inputs
-        id: ya
+      - name: Fetch PR and check whitelists
+        id: policy
+        uses: actions/github-script@v9
         env:
-          JOB_INPUTS: ${{ inputs.job_inputs }}
-        shell: bash
-        run: |
-          python3 - <<'PY'
-          import json, os, sys
-
-          raw = os.environ.get("JOB_INPUTS") or "{}"
-          try:
-              data = json.loads(raw)
-          except json.JSONDecodeError as e:
-              print(f"::error::job_inputs is not valid JSON: {e}")
-              sys.exit(1)
-          if not isinstance(data, dict):
-              print("::error::job_inputs must be a JSON object")
-              sys.exit(1)
-
-          def as_str(key, default=""):
-              if key not in data or data[key] is None:
-                  return default
-              v = data[key]
-              if isinstance(v, bool):
-                  return "true" if v else "false"
-              return str(v)
-
-          defaults = {
-              "build_target": "ydb/",
-              "build_preset": "relwithdebinfo",
-              "run_tests": "true",
-              "increment": "false",
-              "fetch_depth": "2",
-              "test_size": "small,medium",
-              "test_type": "",
-              "test_threads": "64",
-              "link_threads": "2",
-              "test_retry_count": "",
-              "additional_ya_make_args": "",
-              "put_build_results_to_cache": "true",
-              "collect_coredumps": "false",
-              "custom_branch_name": "",
-          }
-          out = {k: as_str(k, d) for k, d in defaults.items()}
-          if out["increment"].lower() in ("1", "true", "yes"):
-              out["fetch_depth"] = "0"
-          if not out["custom_branch_name"]:
-              print(
-                  "::warning::job_inputs.custom_branch_name is empty; "
-                  "analytics may attribute this run to the wrong branch"
-              )
-
-          path = os.environ["GITHUB_OUTPUT"]
-          with open(path, "a", encoding="utf-8") as f:
-              for k, v in out.items():
-                  f.write(f"{k}={v}\n")
-          print(json.dumps(out, ensure_ascii=False, indent=2))
-          PY
-
-      - name: Resolve code_ref
-        id: ref
-        shell: bash
-        run: |
-          code_ref='${{ inputs.code_ref }}'
-          if [ -z "$code_ref" ]; then
-            code_ref='main'
-          fi
-          echo "code=$code_ref" >> "$GITHUB_OUTPUT"
-          {
-            echo "### CI remote executor (nebius TEMP alias)"
-            echo "- **platform repo:** \`ydb-platform/ydb\`"
-            echo "- **code ref:** \`$code_ref\`"
-            echo "- **analytics branch:** \`${{ steps.ya.outputs.custom_branch_name }}\`"
-            echo "- **preset:** \`${{ steps.ya.outputs.build_preset }}\`"
-            echo "- **target:** \`${{ steps.ya.outputs.build_target }}\`"
-            echo "- **runs_on:** \`${{ inputs.runs_on }}\`"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Checkout ydb-platform/ydb
-        uses: actions/checkout@v7
+          PR_ID: ${{ inputs.pr_id }}
+          RUN_X86: ${{ inputs.x86 }}
+          RUN_ARM64: ${{ inputs.arm64 }}
         with:
-          repository: ydb-platform/ydb
-          ref: ${{ steps.ref.outputs.code }}
-          fetch-depth: ${{ steps.ya.outputs.fetch_depth }}
-          token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN || github.token }}
-          persist-credentials: false
+          script: |
+            if (process.env.RUN_X86 !== 'true' && process.env.RUN_ARM64 !== 'true') {
+              core.setFailed('Select at least one architecture: x86 or arm64.');
+              return false;
+            }
+            return true;
+            const { data: pr } = await github.rest.pulls.get({
+              owner: process.env.PR_OWNER,
+              repo: process.env.PR_REPO,
+              pull_number: Number(process.env.PR_ID),
+            });
 
-      - name: Setup ydb access
-        uses: ./.github/actions/setup_ci_ydb_service_account_key_file_credentials
-        with:
-          ci_ydb_service_account_key_file_credentials: ${{ secrets.CI_YDB_SERVICE_ACCOUNT_KEY_FILE_CREDENTIALS }}
-          ydb_qa_config: ${{ vars.YDB_QA_CONFIG }}
+            const authors = JSON.parse(process.env.ALLOWED_AUTHORS);
+            const branches = JSON.parse(process.env.ALLOWED_BASE_BRANCHES);
+            const allowed = pr.state === 'open'
+              && authors.includes(pr.user.login)
+              && branches.includes(pr.base.ref);
 
-      - name: Build and test (platform action from checkout)
-        uses: ./.github/actions/build_and_test_ya
-        with:
-          build_preset: ${{ steps.ya.outputs.build_preset }}
-          build_target: ${{ steps.ya.outputs.build_target }}
-          run_tests: ${{ steps.ya.outputs.run_tests }}
-          increment: ${{ steps.ya.outputs.increment }}
-          test_size: ${{ steps.ya.outputs.test_size }}
-          test_type: ${{ steps.ya.outputs.test_type }}
-          test_threads: ${{ steps.ya.outputs.test_threads }}
-          link_threads: ${{ steps.ya.outputs.link_threads }}
-          test_retry_count: ${{ steps.ya.outputs.test_retry_count }}
-          put_build_results_to_cache: ${{ steps.ya.outputs.put_build_results_to_cache }}
-          collect_coredumps: ${{ steps.ya.outputs.collect_coredumps }}
-          custom_branch_name: ${{ steps.ya.outputs.custom_branch_name }}
-          additional_ya_make_args: -DDEBUGINFO_LINES_ONLY ${{ steps.ya.outputs.additional_ya_make_args }}
-          secs: >-
-            ${{ format('{{"AWS_KEY_ID":{0},"AWS_KEY_VALUE":{1},"REMOTE_CACHE_USERNAME":{2},"REMOTE_CACHE_PASSWORD":{3},"YDBOT_TELEGRAM_BOT_TOKEN":{4}}}',
-              toJSON(secrets.AWS_KEY_ID), toJSON(secrets.AWS_KEY_VALUE),
-              toJSON(secrets.REMOTE_CACHE_USERNAME), toJSON(secrets.REMOTE_CACHE_PASSWORD),
-              toJSON(secrets.YDBOT_TELEGRAM_BOT_TOKEN)) }}
-          vars: >-
-            ${{ format('{{"AWS_BUCKET":{0},"AWS_ENDPOINT":{1},"AWS_REGION":{2},"REMOTE_CACHE_URL":{3},"GH_ALERTS_TG_LOGINS":{4},"GH_ALERTS_TG_CHAT":{5}}}',
-              toJSON(vars.AWS_BUCKET), toJSON(vars.AWS_ENDPOINT), toJSON(vars.AWS_REGION),
-              toJSON(vars.REMOTE_CACHE_URL_YA), toJSON(vars.GH_ALERTS_TG_LOGINS), toJSON(vars.GH_ALERTS_TG_CHAT)) }}
+            core.info(`PR #${pr.number}: author=${pr.user.login}, base=${pr.base.ref}, state=${pr.state}`);
+            core.info(allowed ? 'PR checks authorized.' : 'PR checks skipped by policy.');
+            return allowed;
+
+  check-pr:
+    needs: authorize-pr
+    if: needs.authorize-pr.outputs.allowed == 'true'
+    uses: ./.github/workflows/run-pr-check.yml
+    secrets: inherit
+    with:
+      pr_id: ${{ fromJSON(inputs.pr_id) }}
+      target: ${{ inputs.target }}
+      x86: ${{ inputs.x86 }}
+      arm64: ${{ inputs.arm64 }}
+      incremental: ${{ inputs.incremental }}
+      put_to_cache: ${{ inputs.put_to_cache }}
