@@ -53,6 +53,7 @@ jobs:
           CLAIM_S3_BUCKET: ${{ vars.AWS_BUCKET }}
           CLAIM_PUBLIC_BASE: ${{ vars.CLAIM_PUBLIC_BASE }}
           TICKET_BASE_URL: ${{ vars.TICKET_BASE_URL }}
+          PLATFORM_WORKFLOW_NAMES: ${{ vars.PLATFORM_WORKFLOW_NAMES || 'Run and debug tests' }}
           WORKFLOW_FILE: ci_remote_executor.yml
           EXECUTOR_REF: ${{ vars.EXECUTOR_REF || 'nebius-ci' }}
         run: python3 .github/scripts/ci/remote_pull_poller.py
