@@ -1,0 +1,59 @@
+# Claim platform remote-ticket artifacts and start ci_remote_executor locally.
+# Trigger: schedule, manual, or repository_dispatch from a GitHub webhook proxy
+# (client_payload.platform_run_id). Needs PLATFORM_GH_TOKEN with actions:read on
+# the platform repo — github.token cannot read cross-repo artifacts.
+name: CI remote pull poller
+
+on:
+  workflow_dispatch:
+    inputs:
+      platform_run_id:
+        description: 'Optional single platform run id (webhook). Empty = scan open runs.'
+        required: false
+        type: string
+        default: ''
+  repository_dispatch:
+    types: [platform_remote_ticket]
+  schedule:
+    # Backup if webhook is late; artifact handoff is primary.
+    - cron: '*/5 * * * *'
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          sparse-checkout: |
+            .github/scripts/ci
+            .github/actions/s3cmd
+          sparse-checkout-cone-mode: false
+
+      - name: Configure claim s3cmd
+        uses: ./.github/actions/s3cmd
+        with:
+          s3_key_id: ${{ secrets.AWS_KEY_ID }}
+          s3_key_secret: ${{ secrets.AWS_KEY_VALUE }}
+          s3_bucket: ${{ vars.AWS_BUCKET }}
+          s3_endpoint: ${{ vars.AWS_ENDPOINT }}
+          build_preset: relwithdebinfo
+
+      - name: Claim remote-ticket → dispatch executor
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PLATFORM_GH_TOKEN: ${{ secrets.PLATFORM_GH_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PLATFORM_REPOSITORY: ${{ vars.PLATFORM_REPOSITORY || 'ydb-platform/ydb' }}
+          PLATFORM_RUN_ID: ${{ inputs.platform_run_id || github.event.client_payload.platform_run_id || '' }}
+          CLAIM_S3_BUCKET: ${{ vars.AWS_BUCKET }}
+          CLAIM_PUBLIC_BASE: ${{ vars.CLAIM_PUBLIC_BASE }}
+          TICKET_BASE_URL: ${{ vars.TICKET_BASE_URL }}
+          WORKFLOW_FILE: ci_remote_executor.yml
+          EXECUTOR_REF: ${{ github.event.repository.default_branch || 'main' }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+        run: python3 .github/scripts/ci/remote_pull_poller.py

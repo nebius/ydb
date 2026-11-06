@@ -1,23 +1,26 @@
 # Thin Nebius host for platform CI ("set and forget").
 # Checkouts ydb-platform/ydb@code_ref and runs build_and_test_ya from THAT tree —
 # do not sync platform .github into this repo.
+#
+# Inputs are filled by ci_remote_pull_poller from the platform Actions artifact
+# `remote-ticket` (webhook payloads lack workflow_dispatch inputs). See REMOTE_PULL.md.
 name: CI remote executor
 
 on:
   workflow_dispatch:
     inputs:
       code_ref:
-        description: 'ydb-platform/ydb ref/SHA to checkout and test'
+        description: 'ydb-platform/ydb ref/SHA to checkout and test (from remote-ticket)'
         required: false
         type: string
         default: 'main'
       job_inputs:
-        description: 'JSON object of build_and_test_ya public params (no secrets)'
+        description: 'JSON build_and_test_ya params from remote-ticket.config.inputs.job_inputs'
         required: false
         type: string
         default: '{}'
       runs_on:
-        description: 'JSON array of GitHub runs-on labels'
+        description: 'JSON runs-on labels from remote-ticket.config.inputs.runs_on'
         required: false
         type: string
         default: '["self-hosted","linux","amd64-large"]'
