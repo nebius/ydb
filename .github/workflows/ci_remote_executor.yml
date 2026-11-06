@@ -1,11 +1,21 @@
-# Thin Nebius host: checkout ydb-platform/ydb@code_ref, run build_and_test_ya from that tree.
-# Do not sync platform .github here. Inputs normally come from ci_remote_pull_poller
-# (platform artifact remote-ticket). See .github/scripts/ci/REMOTE_PULL.md.
+# Thin Nebius host. Triggered by the host VM after a platform webhook (not by
+# platform PAT / not by an in-repo poller). VM downloads platform artifact
+# `remote-ticket` and workflow_dispatch'es this WF with config.inputs.
+# Writes claim + build artifacts to *this* repo's public S3 only.
 name: CI remote executor
 
 on:
   workflow_dispatch:
     inputs:
+      platform_run_id:
+        description: 'ydb-platform/ydb Actions run id (claim key / waiter)'
+        required: true
+        type: string
+      platform_repository:
+        description: 'Platform repo that published remote-ticket'
+        required: false
+        type: string
+        default: 'ydb-platform/ydb'
       code_ref:
         description: 'ydb-platform/ydb ref/SHA to checkout and test'
         required: false
@@ -23,8 +33,7 @@ on:
         default: '["self-hosted","linux","amd64-large"]'
 
 concurrency:
-  # Keep under GitHub's 400-char limit (do not embed full job_inputs JSON).
-  group: ci-remote-executor-${{ inputs.code_ref || github.sha }}-${{ github.run_id }}
+  group: ci-remote-executor-${{ inputs.platform_run_id || github.run_id }}
   cancel-in-progress: false
 
 permissions:
@@ -37,6 +46,69 @@ jobs:
     runs-on: ${{ fromJSON(inputs.runs_on) }}
     timeout-minutes: 1200
     steps:
+      - name: Checkout host CI helpers
+        uses: actions/checkout@v5
+        with:
+          sparse-checkout: |
+            .github/actions/s3cmd
+          sparse-checkout-cone-mode: false
+
+      - name: Configure host s3cmd
+        uses: ./.github/actions/s3cmd
+        with:
+          s3_key_id: ${{ secrets.AWS_KEY_ID }}
+          s3_key_secret: ${{ secrets.AWS_KEY_VALUE }}
+          s3_bucket: ${{ vars.AWS_BUCKET }}
+          s3_endpoint: ${{ vars.AWS_ENDPOINT }}
+          build_preset: relwithdebinfo
+
+      - name: Publish claim for platform waiter
+        env:
+          PLATFORM_RUN_ID: ${{ inputs.platform_run_id }}
+          PLATFORM_REPOSITORY: ${{ inputs.platform_repository }}
+          CLAIM_BUCKET: ${{ vars.AWS_BUCKET }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${PLATFORM_RUN_ID}" ]; then
+            echo "::error::platform_run_id is required"
+            exit 1
+          fi
+          python3 - <<'PY'
+          import json, os, subprocess, tempfile
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          platform_run_id = os.environ["PLATFORM_RUN_ID"]
+          bucket = os.environ["CLAIM_BUCKET"]
+          run_id = os.environ["GITHUB_RUN_ID"]
+          repo = os.environ["GITHUB_REPOSITORY"]
+          server = os.environ.get("GITHUB_SERVER_URL", "https://github.com")
+          claim = {
+              "version": 1,
+              "status": "dispatched",
+              "platform_run_id": platform_run_id,
+              "platform_repository": os.environ.get("PLATFORM_REPOSITORY") or "",
+              "executor_run_id": run_id,
+              "executor_run_url": f"{server}/{repo}/actions/runs/{run_id}",
+              "executor_repository": repo,
+              "claimed_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+          }
+          key = f"remote-claims/{platform_run_id}.json"
+          with tempfile.TemporaryDirectory() as tmp:
+              path = Path(tmp) / "claim.json"
+              path.write_text(json.dumps(claim, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+              cmd = [
+                  "s3cmd", "put", "--acl-public", "--no-progress",
+                  "--no-mime-magic", "--guess-mime-type",
+                  str(path), f"s3://{bucket}/{key}",
+              ]
+              print("+", " ".join(cmd), flush=True)
+              subprocess.check_call(cmd)
+          print(json.dumps(claim, indent=2))
+          print(f"::notice title=Claim published::s3://{bucket}/{key}")
+          PY
+
       - name: Parse job_inputs
         id: ya
         env:
@@ -77,16 +149,11 @@ jobs:
               "test_retry_count": "",
               "additional_ya_make_args": "",
               "put_build_results_to_cache": "true",
-              # Match run_tests / build_and_test_ya default.
               "collect_coredumps": "true",
-              # Test-history / ya GIT_BRANCH (must NOT be the Nebius host ref).
               "custom_branch_name": "",
-              # PR attribution for analytics (workflow_dispatch has no github.event.number).
               "pull_number": "",
               "add_vcs_info": "false",
-              # Mute/BI job_name when github.workflow is the thin host (e.g. Regression-run_Large).
               "analytics_job_name": "",
-              # Caller event/run for analytics pull naming (this host is always workflow_dispatch).
               "source_event_name": "",
               "source_run_id": "",
           }
@@ -104,7 +171,6 @@ jobs:
                   "analytics job_name will be this workflow's name"
               )
 
-          # blacklist_paths: string (newline/comma) or JSON list → temp yaml for ya.
           raw_bl = data.get("blacklist_paths") or ""
           if isinstance(raw_bl, list):
               bl_paths = [str(p).strip() for p in raw_bl if str(p).strip()]
@@ -140,8 +206,8 @@ jobs:
           fi
           echo "code=$code_ref" >> "$GITHUB_OUTPUT"
           {
-            echo "### CI remote executor (nebius)"
-            echo "- **platform repo:** \`ydb-platform/ydb\`"
+            echo "### CI remote executor"
+            echo "- **platform run:** \`${{ inputs.platform_run_id }}\` (\`${{ inputs.platform_repository }}\`)"
             echo "- **code ref:** \`$code_ref\`"
             echo "- **analytics branch:** \`${{ steps.ya.outputs.custom_branch_name }}\`"
             echo "- **analytics job:** \`${{ steps.ya.outputs.analytics_job_name }}\`"
@@ -161,8 +227,7 @@ jobs:
           token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN || github.token }}
           persist-credentials: false
 
-      # No Setup ydb access: Nebius must not read/write YC YDB QA.
-      # Host S3/cache come from this repo's secrets/vars below.
+      # No YC YDB QA on Nebius. Host S3/cache from this repo's secrets/vars.
       - name: Build and test (platform action from checkout)
         uses: ./.github/actions/build_and_test_ya
         with:
