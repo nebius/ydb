@@ -1,7 +1,7 @@
-# Thin Nebius host. Triggered by the host VM after a platform webhook (not by
-# platform PAT / not by an in-repo poller). VM downloads platform artifact
-# `remote-ticket` and workflow_dispatch'es this WF with config.inputs.
-# Writes claim + build artifacts to *this* repo's public S3 only.
+# Thin Nebius host. Triggered by the host VM after a platform webhook.
+# Run context comes ONLY from the platform Actions artifact `remote-ticket`
+# (VM downloads it via GitHub API and passes config.inputs here).
+# Never read platform/YC S3. Claim + build outputs → this repo's public S3 only.
 name: CI remote executor
 
 on:
