@@ -11,6 +11,11 @@ on:
         description: 'ydb-platform/ydb Actions run id (claim key / waiter)'
         required: true
         type: string
+      platform_run_attempt:
+        description: 'Platform github.run_attempt (avoids re-run attaching to stale claim)'
+        required: false
+        type: string
+        default: '1'
       platform_repository:
         description: 'Platform repo that published remote-ticket'
         required: false
@@ -33,12 +38,11 @@ on:
         default: '["self-hosted","linux","amd64-large"]'
 
 concurrency:
-  group: ci-remote-executor-${{ inputs.platform_run_id || github.run_id }}
-  cancel-in-progress: false
+  group: ci-remote-executor-${{ inputs.platform_run_id }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
-  actions: read
 
 jobs:
   execute:
@@ -60,63 +64,18 @@ jobs:
           s3_key_secret: ${{ secrets.AWS_KEY_VALUE }}
           s3_bucket: ${{ vars.AWS_BUCKET }}
           s3_endpoint: ${{ vars.AWS_ENDPOINT }}
-          build_preset: relwithdebinfo
-
-      - name: Publish claim for platform waiter
-        env:
-          PLATFORM_RUN_ID: ${{ inputs.platform_run_id }}
-          PLATFORM_REPOSITORY: ${{ inputs.platform_repository }}
-          CLAIM_BUCKET: ${{ vars.AWS_BUCKET }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ -z "${PLATFORM_RUN_ID}" ]; then
-            echo "::error::platform_run_id is required"
-            exit 1
-          fi
-          python3 - <<'PY'
-          import json, os, subprocess, tempfile
-          from datetime import datetime, timezone
-          from pathlib import Path
-
-          platform_run_id = os.environ["PLATFORM_RUN_ID"]
-          bucket = os.environ["CLAIM_BUCKET"]
-          run_id = os.environ["GITHUB_RUN_ID"]
-          repo = os.environ["GITHUB_REPOSITORY"]
-          server = os.environ.get("GITHUB_SERVER_URL", "https://github.com")
-          claim = {
-              "version": 1,
-              "status": "dispatched",
-              "platform_run_id": platform_run_id,
-              "platform_repository": os.environ.get("PLATFORM_REPOSITORY") or "",
-              "executor_run_id": run_id,
-              "executor_run_url": f"{server}/{repo}/actions/runs/{run_id}",
-              "executor_repository": repo,
-              "claimed_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-          }
-          key = f"remote-claims/{platform_run_id}.json"
-          with tempfile.TemporaryDirectory() as tmp:
-              path = Path(tmp) / "claim.json"
-              path.write_text(json.dumps(claim, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-              cmd = [
-                  "s3cmd", "put", "--acl-public", "--no-progress",
-                  "--no-mime-magic", "--guess-mime-type",
-                  str(path), f"s3://{bucket}/{key}",
-              ]
-              print("+", " ".join(cmd), flush=True)
-              subprocess.check_call(cmd)
-          print(json.dumps(claim, indent=2))
-          print(f"::notice title=Claim published::s3://{bucket}/{key}")
-          PY
+          s3_region: ${{ vars.AWS_REGION }}
+          public_acl: 'false'
 
       - name: Parse job_inputs
         id: ya
         env:
           JOB_INPUTS: ${{ inputs.job_inputs }}
+          PLATFORM_RUN_ID: ${{ inputs.platform_run_id }}
         shell: bash
         run: |
           python3 - <<'PY'
-          import json, os, sys
+          import json, os, sys, uuid
 
           raw = os.environ.get("JOB_INPUTS") or "{}"
           try:
@@ -149,7 +108,7 @@ jobs:
               "test_retry_count": "",
               "additional_ya_make_args": "",
               "put_build_results_to_cache": "true",
-              "collect_coredumps": "true",
+              "collect_coredumps": "false",
               "custom_branch_name": "",
               "pull_number": "",
               "add_vcs_info": "false",
@@ -160,16 +119,22 @@ jobs:
           out = {k: as_str(k, d) for k, d in defaults.items()}
           if out["increment"].lower() in ("1", "true", "yes"):
               out["fetch_depth"] = "0"
-          if not out["custom_branch_name"]:
+
+          missing = [
+              k for k in ("custom_branch_name", "analytics_job_name", "source_run_id")
+              if not out[k].strip()
+          ]
+          if missing:
+              print(f"::error::job_inputs missing required fields: {', '.join(missing)}")
+              sys.exit(1)
+
+          platform_run_id = (os.environ.get("PLATFORM_RUN_ID") or "").strip()
+          if platform_run_id and out["source_run_id"] != platform_run_id:
               print(
-                  "::warning::job_inputs.custom_branch_name is empty; "
-                  "analytics may attribute this run to the host workflow ref"
+                  f"::error::job_inputs.source_run_id={out['source_run_id']!r} "
+                  f"!= platform_run_id={platform_run_id!r}"
               )
-          if not out["analytics_job_name"]:
-              print(
-                  "::warning::job_inputs.analytics_job_name is empty; "
-                  "analytics job_name will be this workflow's name"
-              )
+              sys.exit(1)
 
           raw_bl = data.get("blacklist_paths") or ""
           if isinstance(raw_bl, list):
@@ -185,41 +150,115 @@ jobs:
               bl_path = os.path.join(os.environ.get("RUNNER_TEMP", "/tmp"), "test_blacklist.yaml")
               with open(bl_path, "w", encoding="utf-8") as bf:
                   for p in bl_paths:
-                      bf.write(f"- path: {p}\n")
+                      bf.write(f"- path: {json.dumps(p)}\n")
               out["blacklist_file"] = bl_path
               print(f"blacklist_file={bl_path} paths={bl_paths}")
 
           path = os.environ["GITHUB_OUTPUT"]
           with open(path, "a", encoding="utf-8") as f:
               for k, v in out.items():
-                  f.write(f"{k}={v}\n")
+                  if "\n" in v or "\r" in v:
+                      delim = f"ghadelimiter_{uuid.uuid4().hex}"
+                      f.write(f"{k}<<{delim}\n{v}\n{delim}\n")
+                  else:
+                      f.write(f"{k}={v}\n")
           print(json.dumps(out, ensure_ascii=False, indent=2))
+          PY
+
+      - name: Publish claim for platform waiter
+        id: claim
+        env:
+          PLATFORM_RUN_ID: ${{ inputs.platform_run_id }}
+          PLATFORM_RUN_ATTEMPT: ${{ inputs.platform_run_attempt }}
+          PLATFORM_REPOSITORY: ${{ inputs.platform_repository }}
+          CLAIM_BUCKET: ${{ vars.AWS_BUCKET }}
+          S3_PUBLIC_ACL_FLAG: ${{ env.S3_PUBLIC_ACL_FLAG }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${PLATFORM_RUN_ID}" ]; then
+            echo "::error::platform_run_id is required"
+            exit 1
+          fi
+          python3 - <<'PY'
+          import json, os, subprocess, tempfile
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          platform_run_id = os.environ["PLATFORM_RUN_ID"]
+          attempt = (os.environ.get("PLATFORM_RUN_ATTEMPT") or "1").strip() or "1"
+          bucket = os.environ["CLAIM_BUCKET"]
+          run_id = os.environ["GITHUB_RUN_ID"]
+          repo = os.environ["GITHUB_REPOSITORY"]
+          server = os.environ.get("GITHUB_SERVER_URL", "https://github.com")
+          acl = (os.environ.get("S3_PUBLIC_ACL_FLAG") or "").strip()
+          claim = {
+              "version": 1,
+              "status": "dispatched",
+              "platform_run_id": platform_run_id,
+              "platform_run_attempt": attempt,
+              "platform_repository": os.environ.get("PLATFORM_REPOSITORY") or "",
+              "executor_run_id": run_id,
+              "executor_run_url": f"{server}/{repo}/actions/runs/{run_id}",
+              "executor_repository": repo,
+              "claimed_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+          }
+          key = f"remote-claims/{platform_run_id}.json"
+          with tempfile.TemporaryDirectory() as tmp:
+              path = Path(tmp) / "claim.json"
+              path.write_text(json.dumps(claim, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+              cmd = [
+                  "s3cmd", "put", "--no-progress",
+                  "--no-mime-magic", "--guess-mime-type",
+                  str(path), f"s3://{bucket}/{key}",
+              ]
+              if acl:
+                  cmd.insert(2, acl)
+              print("+", " ".join(cmd), flush=True)
+              subprocess.check_call(cmd)
+          print(json.dumps(claim, indent=2))
+          print(f"::notice title=Claim published::s3://{bucket}/{key} attempt={attempt}")
           PY
 
       - name: Resolve code_ref
         id: ref
+        env:
+          CODE_REF: ${{ inputs.code_ref }}
+          PLATFORM_RUN_ID: ${{ inputs.platform_run_id }}
+          PLATFORM_REPOSITORY: ${{ inputs.platform_repository }}
+          PLATFORM_RUN_ATTEMPT: ${{ inputs.platform_run_attempt }}
+          CUSTOM_BRANCH_NAME: ${{ steps.ya.outputs.custom_branch_name }}
+          ANALYTICS_JOB_NAME: ${{ steps.ya.outputs.analytics_job_name }}
+          PULL_NUMBER: ${{ steps.ya.outputs.pull_number }}
+          SOURCE_EVENT_NAME: ${{ steps.ya.outputs.source_event_name }}
+          SOURCE_RUN_ID: ${{ steps.ya.outputs.source_run_id }}
+          BUILD_PRESET: ${{ steps.ya.outputs.build_preset }}
+          BUILD_TARGET: ${{ steps.ya.outputs.build_target }}
+          RUNS_ON: ${{ inputs.runs_on }}
         shell: bash
         run: |
-          code_ref='${{ inputs.code_ref }}'
+          set -euo pipefail
+          code_ref="${CODE_REF:-main}"
           if [ -z "$code_ref" ]; then
             code_ref='main'
           fi
           echo "code=$code_ref" >> "$GITHUB_OUTPUT"
           {
             echo "### CI remote executor"
-            echo "- **platform run:** \`${{ inputs.platform_run_id }}\` (\`${{ inputs.platform_repository }}\`)"
-            echo "- **code ref:** \`$code_ref\`"
-            echo "- **analytics branch:** \`${{ steps.ya.outputs.custom_branch_name }}\`"
-            echo "- **analytics job:** \`${{ steps.ya.outputs.analytics_job_name }}\`"
-            echo "- **pull number:** \`${{ steps.ya.outputs.pull_number }}\`"
-            echo "- **source event:** \`${{ steps.ya.outputs.source_event_name }}\` / \`${{ steps.ya.outputs.source_run_id }}\`"
-            echo "- **preset:** \`${{ steps.ya.outputs.build_preset }}\`"
-            echo "- **target:** \`${{ steps.ya.outputs.build_target }}\`"
-            echo "- **runs_on:** \`${{ inputs.runs_on }}\`"
+            printf -- '- **platform run:** `%s` (`%s`) attempt `%s`\n' \
+              "$PLATFORM_RUN_ID" "$PLATFORM_REPOSITORY" "${PLATFORM_RUN_ATTEMPT:-1}"
+            printf -- '- **code ref:** `%s`\n' "$code_ref"
+            printf -- '- **analytics branch:** `%s`\n' "$CUSTOM_BRANCH_NAME"
+            printf -- '- **analytics job:** `%s`\n' "$ANALYTICS_JOB_NAME"
+            printf -- '- **pull number:** `%s`\n' "$PULL_NUMBER"
+            printf -- '- **source event:** `%s` / `%s`\n' "$SOURCE_EVENT_NAME" "$SOURCE_RUN_ID"
+            printf -- '- **preset:** `%s`\n' "$BUILD_PRESET"
+            printf -- '- **target:** `%s`\n' "$BUILD_TARGET"
+            printf -- '- **runs_on:** `%s`\n' "$RUNS_ON"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Checkout ydb-platform/ydb
-        uses: actions/checkout@v7
+        uses: actions/checkout@v5
         with:
           repository: ydb-platform/ydb
           ref: ${{ steps.ref.outputs.code }}
@@ -227,7 +266,6 @@ jobs:
           token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN || github.token }}
           persist-credentials: false
 
-      # No platform YDB QA on this host. S3/cache from this repo's secrets/vars.
       - name: Build and test (platform action from checkout)
         uses: ./.github/actions/build_and_test_ya
         with:
@@ -259,3 +297,57 @@ jobs:
             ${{ format('{{"AWS_BUCKET":{0},"AWS_ENDPOINT":{1},"AWS_REGION":{2},"REMOTE_CACHE_URL":{3},"GH_ALERTS_TG_LOGINS":{4},"GH_ALERTS_TG_CHAT":{5}}}',
               toJSON(vars.AWS_BUCKET), toJSON(vars.AWS_ENDPOINT), toJSON(vars.AWS_REGION),
               toJSON(vars.REMOTE_CACHE_URL_YA), toJSON(vars.GH_ALERTS_TG_LOGINS), toJSON(vars.GH_ALERTS_TG_CHAT)) }}
+
+      - name: Publish failed claim
+        # Only when claim was never successfully published (parse/config/claim put failure).
+        # After a good claim the waiter follows the executor run conclusion.
+        if: failure() && steps.claim.outcome != 'success'
+        continue-on-error: true
+        env:
+          PLATFORM_RUN_ID: ${{ inputs.platform_run_id }}
+          PLATFORM_RUN_ATTEMPT: ${{ inputs.platform_run_attempt }}
+          PLATFORM_REPOSITORY: ${{ inputs.platform_repository }}
+          CLAIM_BUCKET: ${{ vars.AWS_BUCKET }}
+          S3_PUBLIC_ACL_FLAG: ${{ env.S3_PUBLIC_ACL_FLAG }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, subprocess, tempfile
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          platform_run_id = os.environ["PLATFORM_RUN_ID"]
+          attempt = (os.environ.get("PLATFORM_RUN_ATTEMPT") or "1").strip() or "1"
+          bucket = os.environ["CLAIM_BUCKET"]
+          run_id = os.environ["GITHUB_RUN_ID"]
+          repo = os.environ["GITHUB_REPOSITORY"]
+          server = os.environ.get("GITHUB_SERVER_URL", "https://github.com")
+          acl = (os.environ.get("S3_PUBLIC_ACL_FLAG") or "").strip()
+          claim = {
+              "version": 1,
+              "status": "failed",
+              "error": "executor failed before claim was published",
+              "platform_run_id": platform_run_id,
+              "platform_run_attempt": attempt,
+              "platform_repository": os.environ.get("PLATFORM_REPOSITORY") or "",
+              "executor_run_id": run_id,
+              "executor_run_url": f"{server}/{repo}/actions/runs/{run_id}",
+              "executor_repository": repo,
+              "claimed_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+          }
+          key = f"remote-claims/{platform_run_id}.json"
+          with tempfile.TemporaryDirectory() as tmp:
+              path = Path(tmp) / "claim.json"
+              path.write_text(json.dumps(claim, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+              cmd = [
+                  "s3cmd", "put", "--no-progress",
+                  "--no-mime-magic", "--guess-mime-type",
+                  str(path), f"s3://{bucket}/{key}",
+              ]
+              if acl:
+                  cmd.insert(2, acl)
+              print("+", " ".join(cmd), flush=True)
+              subprocess.check_call(cmd)
+          print(json.dumps(claim, indent=2))
+          PY
