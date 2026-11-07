@@ -13,24 +13,20 @@ on:
         type: string
       platform_run_attempt:
         description: 'Platform github.run_attempt (avoids re-run attaching to stale claim)'
-        required: false
+        required: true
         type: string
-        default: '1'
       platform_repository:
         description: 'Platform repo that published remote-ticket'
-        required: false
+        required: true
         type: string
-        default: 'ydb-platform/ydb'
       code_ref:
         description: 'ydb-platform/ydb ref/SHA to checkout and test'
-        required: false
+        required: true
         type: string
-        default: 'main'
       job_inputs:
         description: 'JSON object of build_and_test_ya public params (no secrets)'
-        required: false
+        required: true
         type: string
-        default: '{}'
       runs_on:
         description: 'JSON array of GitHub runs-on labels'
         required: false
@@ -48,10 +44,8 @@ jobs:
   execute:
     name: build_and_test_ya · ${{ inputs.code_ref }}
     runs-on: ${{ fromJSON(inputs.runs_on) }}
-    # Match platform waiter (~24h).
     timeout-minutes: 1440
     env:
-      # PEP 668 on host images; build_and_test_ya pip install honours this.
       PIP_BREAK_SYSTEM_PACKAGES: "1"
     steps:
       - name: Checkout host CI helpers
@@ -71,8 +65,6 @@ jobs:
           s3_region: ${{ vars.AWS_REGION }}
           public_acl: 'false'
 
-      # Claim as early as possible so the platform waiter can attach; run conclusion
-      # covers later failures (no separate failed-claim publish).
       - name: Publish claim for platform waiter
         id: claim
         env:
@@ -138,7 +130,7 @@ jobs:
           python3 - <<'PY'
           import json, os, sys, uuid
 
-          raw = os.environ.get("JOB_INPUTS") or "{}"
+          raw = os.environ.get("JOB_INPUTS") or ""
           try:
               data = json.loads(raw)
           except json.JSONDecodeError as e:
@@ -156,37 +148,47 @@ jobs:
                   return "true" if v else "false"
               return str(v)
 
-          defaults = {
-              "build_target": "ydb/",
-              "build_preset": "relwithdebinfo",
-              "run_tests": "true",
-              "increment": "false",
-              "fetch_depth": "2",
-              "test_size": "small,medium",
-              "test_type": "",
-              "test_threads": "64",
-              "link_threads": "2",
-              "test_retry_count": "",
-              "additional_ya_make_args": "",
-              "put_build_results_to_cache": "true",
-              "collect_coredumps": "false",
-              "custom_branch_name": "",
-              "pull_number": "",
-              "analytics_job_name": "",
-              "source_event_name": "",
-              "source_run_id": "",
-          }
-          out = {k: as_str(k, d) for k, d in defaults.items()}
-          if out["increment"].lower() in ("1", "true", "yes"):
-              out["fetch_depth"] = "0"
-
-          missing = [
-              k for k in ("custom_branch_name", "analytics_job_name", "source_run_id")
-              if not out[k].strip()
-          ]
+          required = (
+              "build_target",
+              "build_preset",
+              "run_tests",
+              "increment",
+              "fetch_depth",
+              "test_size",
+              "test_threads",
+              "link_threads",
+              "put_build_results_to_cache",
+              "collect_coredumps",
+              "custom_branch_name",
+              "analytics_job_name",
+              "source_event_name",
+              "source_run_id",
+          )
+          missing = [k for k in required if not as_str(k).strip()]
           if missing:
               print(f"::error::job_inputs missing required fields: {', '.join(missing)}")
               sys.exit(1)
+
+          out = {k: as_str(k) for k in (
+              "build_target",
+              "build_preset",
+              "run_tests",
+              "increment",
+              "fetch_depth",
+              "test_size",
+              "test_type",
+              "test_threads",
+              "link_threads",
+              "test_retry_count",
+              "additional_ya_make_args",
+              "put_build_results_to_cache",
+              "collect_coredumps",
+              "custom_branch_name",
+              "pull_number",
+              "analytics_job_name",
+              "source_event_name",
+              "source_run_id",
+          )}
 
           platform_run_id = (os.environ.get("PLATFORM_RUN_ID") or "").strip()
           if platform_run_id and out["source_run_id"] != platform_run_id:
@@ -207,24 +209,11 @@ jobs:
           print(json.dumps(out, ensure_ascii=False, indent=2))
           PY
 
-      - name: Resolve code_ref
-        id: ref
-        env:
-          CODE_REF: ${{ inputs.code_ref }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          code_ref="${CODE_REF:-main}"
-          if [ -z "$code_ref" ]; then
-            code_ref='main'
-          fi
-          echo "code=$code_ref" >> "$GITHUB_OUTPUT"
-
       - name: Checkout ydb-platform/ydb
         uses: actions/checkout@v5
         with:
           repository: ydb-platform/ydb
-          ref: ${{ steps.ref.outputs.code }}
+          ref: ${{ inputs.code_ref }}
           fetch-depth: ${{ steps.ya.outputs.fetch_depth }}
           token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN || github.token }}
           persist-credentials: false
@@ -260,7 +249,6 @@ jobs:
               toJSON(vars.AWS_BUCKET), toJSON(vars.AWS_ENDPOINT), toJSON(vars.AWS_REGION),
               toJSON(vars.REMOTE_CACHE_URL_YA), toJSON(vars.GH_ALERTS_TG_LOGINS), toJSON(vars.GH_ALERTS_TG_CHAT)) }}
 
-      # Remote-only: durable job_summary + locator at run root (not in shared build_and_test_ya).
       - name: Publish remote artifacts locator
         if: always()
         shell: bash
@@ -274,14 +262,12 @@ jobs:
             echo "::warning::S3_BUCKET_PATH missing; skip remote artifacts locator"
             exit 0
           fi
-          SUMMARY_LINKS="${SUMMARY_LINKS:-$PUBLIC_DIR/summary_links.txt}"
-          JOB_SUMMARY_MD="$PUBLIC_DIR/job_summary.md"
           python3 - <<'PY'
           import os
           from pathlib import Path
 
           public = Path(os.environ["PUBLIC_DIR"])
-          links = Path(os.environ.get("SUMMARY_LINKS") or public / "summary_links.txt")
+          links = public / "summary_links.txt"
           out = public / "job_summary.md"
           parts = []
           if links.is_file():
@@ -294,10 +280,9 @@ jobs:
                   rows.append((int(n), rest))
               parts.append(" | ".join(v for _, v in sorted(rows)))
               parts.append("")
-          for cand in (public / "summary_text.txt", Path("summary_text.txt")):
-              if cand.is_file():
-                  parts.append(cand.read_text(encoding="utf-8").rstrip() + "\n")
-                  break
+          text = public / "summary_text.txt"
+          if text.is_file():
+              parts.append(text.read_text(encoding="utf-8").rstrip() + "\n")
           out.write_text("\n".join(parts), encoding="utf-8")
           print(f"wrote {out} ({out.stat().st_size} bytes)")
           PY
@@ -308,7 +293,7 @@ jobs:
           RUN_ROOT="${RUN_ROOT%/*}"
           # shellcheck disable=SC2086
           s3cmd put ${S3_PUBLIC_ACL_FLAG:-} --no-progress --no-mime-magic --guess-mime-type \
-            "$JOB_SUMMARY_MD" "${RUN_ROOT}/job_summary.md"
+            "$PUBLIC_DIR/job_summary.md" "${RUN_ROOT}/job_summary.md"
           # shellcheck disable=SC2086
           s3cmd put ${S3_PUBLIC_ACL_FLAG:-} --no-progress --no-mime-magic --guess-mime-type \
             "$REMOTE_ARTIFACTS_JSON" "${RUN_ROOT}/remote_artifacts.json"
