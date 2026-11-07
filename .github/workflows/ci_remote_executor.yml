@@ -87,7 +87,7 @@ jobs:
           bucket = os.environ["CLAIM_BUCKET"]
           run_id = os.environ["GITHUB_RUN_ID"]
           repo = os.environ["GITHUB_REPOSITORY"]
-          server = os.environ.get("GITHUB_SERVER_URL", "https://github.com")
+          server = os.environ["GITHUB_SERVER_URL"]
           acl = (os.environ.get("S3_PUBLIC_ACL_FLAG") or "").strip()
           claim = {
               "version": 1,
@@ -121,13 +121,12 @@ jobs:
         id: ya
         env:
           JOB_INPUTS: ${{ inputs.job_inputs }}
-          PLATFORM_RUN_ID: ${{ inputs.platform_run_id }}
         shell: bash
         run: |
           python3 - <<'PY'
           import json, os, sys, uuid
 
-          raw = os.environ.get("JOB_INPUTS") or ""
+          raw = os.environ["JOB_INPUTS"]
           try:
               data = json.loads(raw)
           except json.JSONDecodeError as e:
@@ -137,9 +136,9 @@ jobs:
               print("::error::job_inputs must be a JSON object")
               sys.exit(1)
 
-          def as_str(key, default=""):
+          def as_str(key):
               if key not in data or data[key] is None:
-                  return default
+                  return ""
               v = data[key]
               if isinstance(v, bool):
                   return "true" if v else "false"
@@ -158,40 +157,19 @@ jobs:
               "collect_coredumps",
               "custom_branch_name",
               "analytics_job_name",
-              "source_run_id",
           )
           missing = [k for k in required if not as_str(k).strip()]
           if missing:
               print(f"::error::job_inputs missing required fields: {', '.join(missing)}")
               sys.exit(1)
 
-          out = {k: as_str(k) for k in (
-              "build_target",
-              "build_preset",
-              "run_tests",
-              "increment",
-              "fetch_depth",
-              "test_size",
+          optional = (
               "test_type",
-              "test_threads",
-              "link_threads",
               "test_retry_count",
               "additional_ya_make_args",
-              "put_build_results_to_cache",
-              "collect_coredumps",
-              "custom_branch_name",
               "pull_number",
-              "analytics_job_name",
-              "source_run_id",
-          )}
-
-          platform_run_id = os.environ["PLATFORM_RUN_ID"].strip()
-          if out["source_run_id"] != platform_run_id:
-              print(
-                  f"::error::job_inputs.source_run_id={out['source_run_id']!r} "
-                  f"!= platform_run_id={platform_run_id!r}"
-              )
-              sys.exit(1)
+          )
+          out = {k: as_str(k) for k in required + optional}
 
           path = os.environ["GITHUB_OUTPUT"]
           with open(path, "a", encoding="utf-8") as f:
@@ -230,7 +208,7 @@ jobs:
           custom_branch_name: ${{ steps.ya.outputs.custom_branch_name }}
           pull_number: ${{ steps.ya.outputs.pull_number }}
           analytics_job_name: ${{ steps.ya.outputs.analytics_job_name }}
-          source_run_id: ${{ steps.ya.outputs.source_run_id }}
+          source_run_id: ${{ inputs.platform_run_id }}
           enable_ydb_qa: false
           additional_ya_make_args: -DDEBUGINFO_LINES_ONLY ${{ steps.ya.outputs.additional_ya_make_args }}
           secs: >-
