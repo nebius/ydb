@@ -29,9 +29,8 @@ on:
         type: string
       runs_on:
         description: 'JSON array of GitHub runs-on labels'
-        required: false
+        required: true
         type: string
-        default: '["self-hosted","linux","amd64-large"]'
 
 concurrency:
   group: ci-remote-executor-${{ inputs.platform_run_id }}
@@ -76,17 +75,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [ -z "${PLATFORM_RUN_ID}" ]; then
-            echo "::error::platform_run_id is required"
-            exit 1
-          fi
           python3 - <<'PY'
           import json, os, subprocess, tempfile
           from datetime import datetime, timezone
           from pathlib import Path
 
           platform_run_id = os.environ["PLATFORM_RUN_ID"]
-          attempt = (os.environ.get("PLATFORM_RUN_ATTEMPT") or "1").strip() or "1"
+          attempt = os.environ["PLATFORM_RUN_ATTEMPT"].strip()
+          if not attempt:
+              raise SystemExit("PLATFORM_RUN_ATTEMPT empty")
           bucket = os.environ["CLAIM_BUCKET"]
           run_id = os.environ["GITHUB_RUN_ID"]
           repo = os.environ["GITHUB_REPOSITORY"]
@@ -97,7 +94,7 @@ jobs:
               "status": "dispatched",
               "platform_run_id": platform_run_id,
               "platform_run_attempt": attempt,
-              "platform_repository": os.environ.get("PLATFORM_REPOSITORY") or "",
+              "platform_repository": os.environ["PLATFORM_REPOSITORY"],
               "executor_run_id": run_id,
               "executor_run_url": f"{server}/{repo}/actions/runs/{run_id}",
               "executor_repository": repo,
@@ -161,7 +158,6 @@ jobs:
               "collect_coredumps",
               "custom_branch_name",
               "analytics_job_name",
-              "source_event_name",
               "source_run_id",
           )
           missing = [k for k in required if not as_str(k).strip()]
@@ -186,12 +182,11 @@ jobs:
               "custom_branch_name",
               "pull_number",
               "analytics_job_name",
-              "source_event_name",
               "source_run_id",
           )}
 
-          platform_run_id = (os.environ.get("PLATFORM_RUN_ID") or "").strip()
-          if platform_run_id and out["source_run_id"] != platform_run_id:
+          platform_run_id = os.environ["PLATFORM_RUN_ID"].strip()
+          if out["source_run_id"] != platform_run_id:
               print(
                   f"::error::job_inputs.source_run_id={out['source_run_id']!r} "
                   f"!= platform_run_id={platform_run_id!r}"
@@ -235,7 +230,6 @@ jobs:
           custom_branch_name: ${{ steps.ya.outputs.custom_branch_name }}
           pull_number: ${{ steps.ya.outputs.pull_number }}
           analytics_job_name: ${{ steps.ya.outputs.analytics_job_name }}
-          source_event_name: ${{ steps.ya.outputs.source_event_name }}
           source_run_id: ${{ steps.ya.outputs.source_run_id }}
           enable_ydb_qa: false
           additional_ya_make_args: -DDEBUGINFO_LINES_ONLY ${{ steps.ya.outputs.additional_ya_make_args }}
