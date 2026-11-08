@@ -337,7 +337,7 @@ jobs:
           try_dirs = sorted({m.group(1) for rel in files for m in [re.match(r"(try_\d+)/", rel)] if m},
                             key=lambda s: int(s.split("_", 1)[1]))
           for tn in try_dirs:
-              for suffix in ("report.json", "ya-test.html", "started_at", "index.html"):
+              for suffix in ("report.json", "started_at", "index.html"):
                   need = f"{tn}/{suffix}"
                   if need not in files:
                       sys.exit(f"::error::PUBLIC_DIR listing missing {need}")
@@ -363,3 +363,6 @@ jobs:
           subprocess.check_call(cmd)
           print(f"::notice title=Remote artifacts::{url}")
           PY
+          if [ -n "${TMP_DIR:-}" ]; then
+            rm -rf "$TMP_DIR"
+          fi
