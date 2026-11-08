@@ -366,3 +366,5 @@ jobs:
           if [ -n "${TMP_DIR:-}" ]; then
             rm -rf "$TMP_DIR"
           fi
+          # mktemp s3cmd config (S3CMD_CONFIG); does not match /tmp/systemd-private-*
+          rm -rf /tmp/tmp*
