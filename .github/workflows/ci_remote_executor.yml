@@ -282,48 +282,86 @@ jobs:
 
       - name: Publish remote artifacts locator
         if: always()
+        env:
+          S3_KEY_ID: ${{ secrets.AWS_KEY_ID }}
+          S3_KEY_SECRET: ${{ secrets.AWS_KEY_VALUE }}
+          S3_ENDPOINT: ${{ vars.AWS_ENDPOINT }}
+          S3_REGION: ${{ vars.AWS_REGION }}
         shell: bash
         run: |
           set -euo pipefail
-          for v in S3_BUCKET_PATH PUBLIC_DIR PUBLIC_DIR_URL ORIGINAL_HEAD; do
+          for v in S3_BUCKET_PATH PUBLIC_DIR_URL ORIGINAL_HEAD; do
             if [ -z "${!v:-}" ]; then
               echo "::error::$v missing; cannot publish remote_artifacts.json"
               exit 1
             fi
           done
+          umask 077
+          S3CMD_CONFIG=$(mktemp "${RUNNER_TEMP}/s3cmd.XXXXXX")
+          export S3CMD_CONFIG
+          host="${S3_ENDPOINT#https://}"
+          host="${host#http://}"
+          host="${host%/}"
+          cat <<EOF > "$S3CMD_CONFIG"
+          [default]
+          access_key = ${S3_KEY_ID}
+          secret_key = ${S3_KEY_SECRET}
+          bucket_location = ${S3_REGION:-us-east-1}
+          host_base = ${host}
+          host_bucket = %(bucket)s.${host}
+          EOF
           python3 - <<'PY'
-          import json, os, subprocess, sys
-          from pathlib import Path
+          import json, os, re, subprocess, sys
 
-          bucket_path = os.environ["S3_BUCKET_PATH"]
+          bucket_path = os.environ.get("S3_BUCKET_PATH", "").strip()
+          if not bucket_path:
+              sys.exit("::error::S3_BUCKET_PATH missing; cannot list synced artifacts")
           if not bucket_path.startswith("s3://"):
               sys.exit(f"::error::S3_BUCKET_PATH must be s3://...; got {bucket_path!r}")
           bucket, _, key_prefix = bucket_path[len("s3://"):].partition("/")
+          key_prefix = key_prefix.rstrip("/")
           run_prefix = "/".join((os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_WORKFLOW"], os.environ["GITHUB_RUN_ID"]))
           if not key_prefix.startswith(run_prefix + "/"):
               sys.exit(f"::error::S3_BUCKET_PATH {bucket_path!r} is not under run root {run_prefix!r}")
 
-          public_dir = Path(os.environ["PUBLIC_DIR"])
-          if not public_dir.is_dir():
-              sys.exit(f"::error::PUBLIC_DIR {public_dir!r} is not a directory")
+          config = os.environ.get("S3CMD_CONFIG", "").strip()
+          if not config or not os.path.isfile(config):
+              sys.exit(f"::error::S3CMD_CONFIG {config!r} is not a readable file")
 
+          list_url = f"s3://{bucket}/{key_prefix}/"
+          ls_cmd = ["s3cmd", "--config", config, "ls", "-r", list_url]
+          print("+", " ".join(ls_cmd), flush=True)
+          proc = subprocess.run(ls_cmd, capture_output=True, text=True)
+          if proc.returncode != 0:
+              print(proc.stdout, end="")
+              print(proc.stderr, end="", file=sys.stderr)
+              sys.exit(f"::error::s3cmd ls failed ({proc.returncode}) for {list_url}")
+
+          prefix = f"{key_prefix}/"
           files: list[str] = []
-          root = public_dir.resolve()
-          for path in sorted(public_dir.rglob("*")):
-              if not path.is_file():
+          line_re = re.compile(r"\s+s3://")
+          for line in proc.stdout.splitlines():
+              line = line.strip()
+              if not line or not line_re.search(line):
                   continue
-              try:
-                  rel = path.resolve().relative_to(root).as_posix()
-              except ValueError:
-                  print(f"::warning::skipping path outside PUBLIC_DIR: {path}", file=sys.stderr)
+              s3_uri = line.split()[-1]
+              if not s3_uri.startswith("s3://"):
                   continue
-              if not rel or rel.startswith("/") or "\\" in rel or ".." in rel.split("/"):
+              _, _, key = s3_uri[len("s3://"):].partition("/")
+              if not key.startswith(prefix):
+                  print(f"::warning::skipping key outside artifact prefix: {key}", file=sys.stderr)
+                  continue
+              rel = key[len(prefix):]
+              if not rel or rel.endswith("/"):
+                  continue
+              if rel.startswith("/") or "\\" in rel or ".." in rel.split("/"):
                   print(f"::warning::skipping unsafe relative path {rel!r}", file=sys.stderr)
                   continue
               files.append(rel)
+          files = sorted(set(files))
 
           if not files:
-              print("::warning::PUBLIC_DIR has no files; publishing an empty manifest")
+              sys.exit(f"::error::no objects under {list_url}; refusing empty remote_artifacts manifest")
 
           meta = {
               "version": 1,
@@ -338,16 +376,11 @@ jobs:
               f.write("\n")
           print(json.dumps(meta, ensure_ascii=False, indent=2))
           url = f"s3://{bucket}/{run_prefix}/remote_artifacts.json"
-          cmd = ["s3cmd", "put", "--no-progress", "--no-mime-magic", "--guess-mime-type", out, url]
+          cmd = ["s3cmd", "--config", config, "put", "--no-progress", "--no-mime-magic", "--guess-mime-type", out, url]
           acl = (os.environ.get("S3_PUBLIC_ACL_FLAG") or "").strip()
           if acl:
-              cmd.insert(2, acl)
+              cmd.insert(3, acl)
           print("+", " ".join(cmd), flush=True)
           subprocess.check_call(cmd)
           print(f"::notice title=Remote artifacts::{url}")
           PY
-          if [ -n "${TMP_DIR:-}" ]; then
-            rm -rf "$TMP_DIR"
-          fi
-          # mktemp s3cmd config (S3CMD_CONFIG); does not match /tmp/systemd-private-*
-          rm -rf /tmp/tmp*
