@@ -294,14 +294,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for v in S3_BUCKET_PATH PUBLIC_DIR_URL ORIGINAL_HEAD; do
+          for v in S3_BUCKET_PATH PUBLIC_DIR PUBLIC_DIR_URL ORIGINAL_HEAD; do
             if [ -z "${!v:-}" ]; then
               echo "::error::$v missing; cannot publish remote_artifacts.json"
               exit 1
             fi
           done
           python3 - <<'PY'
-          import json, os, subprocess, sys
+          import json, os, re, subprocess, sys
+          from pathlib import Path
 
           bucket_path = os.environ["S3_BUCKET_PATH"]
           if not bucket_path.startswith("s3://"):
@@ -310,11 +311,43 @@ jobs:
           run_prefix = "/".join((os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_WORKFLOW"], os.environ["GITHUB_RUN_ID"]))
           if not key_prefix.startswith(run_prefix + "/"):
               sys.exit(f"::error::S3_BUCKET_PATH {bucket_path!r} is not under run root {run_prefix!r}")
+
+          public_dir = Path(os.environ["PUBLIC_DIR"])
+          if not public_dir.is_dir():
+              sys.exit(f"::error::PUBLIC_DIR {public_dir!r} is not a directory")
+
+          files: list[str] = []
+          root = public_dir.resolve()
+          for path in sorted(public_dir.rglob("*")):
+              if not path.is_file():
+                  continue
+              try:
+                  rel = path.resolve().relative_to(root).as_posix()
+              except ValueError:
+                  print(f"::warning::skipping path outside PUBLIC_DIR: {path}", file=sys.stderr)
+                  continue
+              if not rel or rel.startswith("/") or "\\" in rel or ".." in rel.split("/"):
+                  print(f"::warning::skipping unsafe relative path {rel!r}", file=sys.stderr)
+                  continue
+              files.append(rel)
+
+          if "ci_metrics.jsonl" not in files:
+              sys.exit("::error::PUBLIC_DIR listing missing ci_metrics.jsonl")
+
+          try_dirs = sorted({m.group(1) for rel in files for m in [re.match(r"(try_\d+)/", rel)] if m},
+                            key=lambda s: int(s.split("_", 1)[1]))
+          for tn in try_dirs:
+              for suffix in ("report.json", "started_at", "index.html"):
+                  need = f"{tn}/{suffix}"
+                  if need not in files:
+                      sys.exit(f"::error::PUBLIC_DIR listing missing {need}")
+
           meta = {
               "version": 1,
               "artifact_key_prefix": key_prefix,
               "public_dir_url": os.environ["PUBLIC_DIR_URL"].rstrip("/"),
               "commit": os.environ["ORIGINAL_HEAD"],
+              "files": files,
           }
           out = os.path.join(os.environ["RUNNER_TEMP"], "remote_artifacts.json")
           with open(out, "w", encoding="utf-8") as f:
@@ -330,3 +363,8 @@ jobs:
           subprocess.check_call(cmd)
           print(f"::notice title=Remote artifacts::{url}")
           PY
+          if [ -n "${TMP_DIR:-}" ]; then
+            rm -rf "$TMP_DIR"
+          fi
+          # mktemp s3cmd config (S3CMD_CONFIG); does not match /tmp/systemd-private-*
+          rm -rf /tmp/tmp*
