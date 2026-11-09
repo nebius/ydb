@@ -291,17 +291,12 @@ jobs:
           S3_KEY_SECRET: ${{ secrets.AWS_KEY_VALUE }}
           S3_ENDPOINT: ${{ vars.AWS_ENDPOINT }}
           S3_REGION: ${{ vars.AWS_REGION }}
+          # Pinned platform ref from the ticket/claim — not ORIGINAL_HEAD from the action.
+          CODE_REF: ${{ needs.claim.outputs.code_ref }}
         shell: bash
         run: |
           set -euo pipefail
-          # Composite normally exports ORIGINAL_HEAD; if build died before that,
-          # use the checked-out platform SHA (workspace is ydb-platform/ydb).
-          if [ -z "${ORIGINAL_HEAD:-}" ]; then
-            ORIGINAL_HEAD=$(git rev-parse HEAD)
-            export ORIGINAL_HEAD
-            echo "::warning::ORIGINAL_HEAD missing from action env; using git HEAD $ORIGINAL_HEAD"
-          fi
-          for v in S3_BUCKET_PATH PUBLIC_DIR_URL ORIGINAL_HEAD; do
+          for v in S3_BUCKET_PATH PUBLIC_DIR_URL CODE_REF; do
             if [ -z "${!v:-}" ]; then
               echo "::error::$v missing; cannot publish remote_artifacts.json"
               exit 1
@@ -388,7 +383,7 @@ jobs:
               "version": 1,
               "artifact_key_prefix": key_prefix,
               "public_dir_url": os.environ["PUBLIC_DIR_URL"].rstrip("/"),
-              "commit": os.environ["ORIGINAL_HEAD"],
+              "commit": os.environ["CODE_REF"],
               "files": files,
           }
           out = os.path.join(os.environ["RUNNER_TEMP"], "remote_artifacts.json")
