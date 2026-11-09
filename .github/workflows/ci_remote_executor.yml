@@ -291,7 +291,6 @@ jobs:
           S3_KEY_SECRET: ${{ secrets.AWS_KEY_VALUE }}
           S3_ENDPOINT: ${{ vars.AWS_ENDPOINT }}
           S3_REGION: ${{ vars.AWS_REGION }}
-          # Pinned platform ref from the ticket/claim — not ORIGINAL_HEAD from the action.
           CODE_REF: ${{ needs.claim.outputs.code_ref }}
         shell: bash
         run: |
