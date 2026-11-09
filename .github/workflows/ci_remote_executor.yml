@@ -294,6 +294,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Composite normally exports ORIGINAL_HEAD; if build died before that,
+          # use the checked-out platform SHA (workspace is ydb-platform/ydb).
+          if [ -z "${ORIGINAL_HEAD:-}" ]; then
+            ORIGINAL_HEAD=$(git rev-parse HEAD)
+            export ORIGINAL_HEAD
+            echo "::warning::ORIGINAL_HEAD missing from action env; using git HEAD $ORIGINAL_HEAD"
+          fi
           for v in S3_BUCKET_PATH PUBLIC_DIR_URL ORIGINAL_HEAD; do
             if [ -z "${!v:-}" ]; then
               echo "::error::$v missing; cannot publish remote_artifacts.json"
