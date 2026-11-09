@@ -7,6 +7,10 @@
 # (not composite inputs) tells that action to skip QA and test commit-status:
 #   CI_DISABLE_YDB_QA=1
 #   CI_REMOTE_EXECUTOR=1
+# s3cmd ls URIs are taken from "s3://" to end of line (workflow name has spaces).
+# Same rule as ydb-platform/ydb .github/scripts/ci/dispatcher/s3cmd_ls.py.
+# Claim inputs are not checked against the platform remote-ticket artifact
+# (no platform token). Residual risk is in that repo's REMOTE_PULL.md.
 # See ydb-platform/ydb .github/scripts/ci/dispatcher/REMOTE_PULL.md.
 name: CI remote executor
 run-name: CI remote executor · ${{ inputs.platform_run_id }}/${{ inputs.platform_run_attempt }} · ${{ inputs.code_ref }}
@@ -311,7 +315,21 @@ jobs:
           host_bucket = %(bucket)s.${host}
           EOF
           python3 - <<'PY'
-          import json, os, re, subprocess, sys
+          import json, os, subprocess, sys
+
+          def parse_s3cmd_ls_line(line: str):
+              """URI from s3:// to EOL. Keep in sync with platform s3cmd_ls.py."""
+              text = line.strip()
+              marker = "s3://"
+              idx = text.find(marker)
+              if idx < 0:
+                  return None
+              if idx > 0 and not text[idx - 1].isspace():
+                  return None
+              uri = text[idx:]
+              if len(uri) <= len(marker):
+                  return None
+              return uri
 
           bucket_path = os.environ.get("S3_BUCKET_PATH", "").strip()
           if not bucket_path:
@@ -339,13 +357,9 @@ jobs:
 
           prefix = f"{key_prefix}/"
           files: list[str] = []
-          line_re = re.compile(r"\s+s3://")
           for line in proc.stdout.splitlines():
-              line = line.strip()
-              if not line or not line_re.search(line):
-                  continue
-              s3_uri = line.split()[-1]
-              if not s3_uri.startswith("s3://"):
+              s3_uri = parse_s3cmd_ls_line(line)
+              if not s3_uri:
                   continue
               _, _, key = s3_uri[len("s3://"):].partition("/")
               if not key.startswith(prefix):
