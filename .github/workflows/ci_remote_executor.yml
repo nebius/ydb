@@ -13,7 +13,18 @@
 # (no platform token). Residual risk is in that repo's REMOTE_PULL.md.
 # See ydb-platform/ydb .github/scripts/ci/dispatcher/REMOTE_PULL.md.
 name: CI remote executor
-run-name: CI remote executor · ${{ inputs.platform_run_id }}/${{ inputs.platform_run_attempt }} · ${{ inputs.code_ref }}
+run-name: >-
+  ${{
+    inputs.caller_workflow != '' &&
+      format('{0} · {1}{2}{3}{4}{5}',
+        inputs.caller_workflow,
+        inputs.caller_event != '' && inputs.caller_event || 'manual',
+        inputs.target_branch != '' && format(' · {0}', inputs.target_branch) || '',
+        inputs.build_preset != '' && format(' · {0}', inputs.build_preset) || '',
+        inputs.pr_number != '' && format(' · #{0}', inputs.pr_number) || '',
+        inputs.pr_title != '' && format(' · {0}', inputs.pr_title) || '')
+    || format('CI remote executor · {0}', inputs.platform_run_id)
+  }}
 
 on:
   workflow_dispatch:
@@ -42,6 +53,36 @@ on:
         description: 'JSON array of GitHub runs-on labels'
         required: true
         type: string
+      caller_workflow:
+        description: 'Platform workflow that dispatched remote (display only)'
+        required: false
+        type: string
+        default: ''
+      caller_event:
+        description: 'Short event for run title: pr | postcommit | manual'
+        required: false
+        type: string
+        default: ''
+      target_branch:
+        description: 'Branch under test for run title (display only)'
+        required: false
+        type: string
+        default: ''
+      build_preset:
+        description: 'Build preset for run title (display only)'
+        required: false
+        type: string
+        default: ''
+      pr_number:
+        description: 'Optional PR number for run title (display only)'
+        required: false
+        type: string
+        default: ''
+      pr_title:
+        description: 'Optional PR title for run title (display only)'
+        required: false
+        type: string
+        default: ''
 
 concurrency:
   group: ci-remote-executor-${{ inputs.platform_run_id }}
@@ -291,10 +332,11 @@ jobs:
           S3_KEY_SECRET: ${{ secrets.AWS_KEY_VALUE }}
           S3_ENDPOINT: ${{ vars.AWS_ENDPOINT }}
           S3_REGION: ${{ vars.AWS_REGION }}
+          CODE_REF: ${{ needs.claim.outputs.code_ref }}
         shell: bash
         run: |
           set -euo pipefail
-          for v in S3_BUCKET_PATH PUBLIC_DIR_URL ORIGINAL_HEAD; do
+          for v in S3_BUCKET_PATH PUBLIC_DIR_URL CODE_REF; do
             if [ -z "${!v:-}" ]; then
               echo "::error::$v missing; cannot publish remote_artifacts.json"
               exit 1
@@ -381,7 +423,7 @@ jobs:
               "version": 1,
               "artifact_key_prefix": key_prefix,
               "public_dir_url": os.environ["PUBLIC_DIR_URL"].rstrip("/"),
-              "commit": os.environ["ORIGINAL_HEAD"],
+              "commit": os.environ["CODE_REF"],
               "files": files,
           }
           out = os.path.join(os.environ["RUNNER_TEMP"], "remote_artifacts.json")
