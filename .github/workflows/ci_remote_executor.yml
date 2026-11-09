@@ -15,11 +15,26 @@
 name: CI remote executor
 run-name: >-
   ${{
-    inputs.pr_title != '' && inputs.pr_number != '' && format('{0} (#{1})', inputs.pr_title, inputs.pr_number)
-    || inputs.caller_workflow != '' && inputs.pr_number != '' && format('{0} (#{1})', inputs.caller_workflow, inputs.pr_number)
-    || inputs.pr_title != '' && inputs.pr_title
-    || inputs.caller_workflow != '' && inputs.caller_workflow
-    || format('CI remote executor · {0}/{1}', inputs.platform_run_id, inputs.platform_run_attempt)
+    inputs.caller_workflow != '' && inputs.pr_number != '' && inputs.pr_title != '' &&
+      format('{0} · {1} · #{2} · {3}',
+        inputs.caller_workflow,
+        inputs.caller_event != '' && inputs.caller_event || 'manual',
+        inputs.pr_number, inputs.pr_title)
+    || inputs.caller_workflow != '' && inputs.pr_number != '' &&
+      format('{0} · {1} · #{2}',
+        inputs.caller_workflow,
+        inputs.caller_event != '' && inputs.caller_event || 'manual',
+        inputs.pr_number)
+    || inputs.caller_workflow != '' && inputs.pr_title != '' &&
+      format('{0} · {1} · {2}',
+        inputs.caller_workflow,
+        inputs.caller_event != '' && inputs.caller_event || 'manual',
+        inputs.pr_title)
+    || inputs.caller_workflow != '' &&
+      format('{0} · {1}',
+        inputs.caller_workflow,
+        inputs.caller_event != '' && inputs.caller_event || 'manual')
+    || format('CI remote executor · {0}', inputs.platform_run_id)
   }}
 
 on:
@@ -51,6 +66,11 @@ on:
         type: string
       caller_workflow:
         description: 'Platform workflow that dispatched remote (display only)'
+        required: false
+        type: string
+        default: ''
+      caller_event:
+        description: 'Short event for run title: pr | postcommit | manual'
         required: false
         type: string
         default: ''
