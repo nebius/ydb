@@ -2,7 +2,18 @@
 # Run context comes ONLY from the platform Actions artifact `remote-ticket`
 # (VM downloads it via GitHub API and passes config.inputs here).
 # Never read platform S3. Claim + build outputs → this repo's public S3 only.
+#
+# The platform action is called with its existing inputs only. Host job env
+# (not composite inputs) tells that action to skip QA and test commit-status:
+#   CI_DISABLE_YDB_QA=1
+#   CI_REMOTE_EXECUTOR=1
+# s3cmd ls URIs are taken from "s3://" to end of line (workflow name has spaces).
+# Same rule as ydb-platform/ydb .github/scripts/ci/dispatcher/s3cmd_ls.py.
+# Claim inputs are not checked against the platform remote-ticket artifact
+# (no platform token). Residual risk is in that repo's REMOTE_PULL.md.
+# See ydb-platform/ydb .github/scripts/ci/dispatcher/REMOTE_PULL.md.
 name: CI remote executor
+run-name: CI remote executor · ${{ inputs.platform_run_id }}/${{ inputs.platform_run_attempt }} · ${{ inputs.code_ref }}
 
 on:
   workflow_dispatch:
@@ -13,29 +24,24 @@ on:
         type: string
       platform_run_attempt:
         description: 'Platform github.run_attempt (avoids re-run attaching to stale claim)'
-        required: false
+        required: true
         type: string
-        default: '1'
       platform_repository:
         description: 'Platform repo that published remote-ticket'
-        required: false
+        required: true
         type: string
-        default: 'ydb-platform/ydb'
       code_ref:
         description: 'ydb-platform/ydb ref/SHA to checkout and test'
-        required: false
+        required: true
         type: string
-        default: 'main'
       job_inputs:
         description: 'JSON object of build_and_test_ya public params (no secrets)'
-        required: false
+        required: true
         type: string
-        default: '{}'
       runs_on:
         description: 'JSON array of GitHub runs-on labels'
-        required: false
+        required: true
         type: string
-        default: '["self-hosted","linux","amd64-large"]'
 
 concurrency:
   group: ci-remote-executor-${{ inputs.platform_run_id }}
@@ -45,17 +51,134 @@ permissions:
   contents: read
 
 jobs:
-  execute:
-    name: build_and_test_ya · ${{ inputs.code_ref }}
-    runs-on: ${{ fromJSON(inputs.runs_on) }}
-    timeout-minutes: 1200
+  claim:
+    name: claim · ${{ inputs.platform_run_id }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      runs_on: ${{ steps.validate.outputs.runs_on }}
+      code_ref: ${{ steps.validate.outputs.code_ref }}
+      build_target: ${{ steps.validate.outputs.build_target }}
+      build_preset: ${{ steps.validate.outputs.build_preset }}
+      run_tests: ${{ steps.validate.outputs.run_tests }}
+      increment: ${{ steps.validate.outputs.increment }}
+      fetch_depth: ${{ steps.validate.outputs.fetch_depth }}
+      test_size: ${{ steps.validate.outputs.test_size }}
+      test_type: ${{ steps.validate.outputs.test_type }}
+      test_threads: ${{ steps.validate.outputs.test_threads }}
+      link_threads: ${{ steps.validate.outputs.link_threads }}
+      test_retry_count: ${{ steps.validate.outputs.test_retry_count }}
+      put_build_results_to_cache: ${{ steps.validate.outputs.put_build_results_to_cache }}
+      collect_coredumps: ${{ steps.validate.outputs.collect_coredumps }}
+      custom_branch_name: ${{ steps.validate.outputs.custom_branch_name }}
+      additional_ya_make_args: ${{ steps.validate.outputs.additional_ya_make_args }}
     steps:
+      - name: Validate inputs
+        id: validate
+        env:
+          PLATFORM_RUN_ID: ${{ inputs.platform_run_id }}
+          PLATFORM_RUN_ATTEMPT: ${{ inputs.platform_run_attempt }}
+          PLATFORM_REPOSITORY: ${{ inputs.platform_repository }}
+          CODE_REF: ${{ inputs.code_ref }}
+          JOB_INPUTS: ${{ inputs.job_inputs }}
+          RUNS_ON: ${{ inputs.runs_on }}
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json, os, re, sys
+
+          errors = []
+          def err(msg):
+              errors.append(msg)
+
+          env = os.environ
+          if not re.fullmatch(r"[0-9]+", env["PLATFORM_RUN_ID"]):
+              err("platform_run_id must be digits")
+          if not re.fullmatch(r"[0-9]+", env["PLATFORM_RUN_ATTEMPT"]):
+              err("platform_run_attempt must be digits")
+          if env["PLATFORM_REPOSITORY"] != "ydb-platform/ydb":
+              err(f"platform_repository must be ydb-platform/ydb, got {env['PLATFORM_REPOSITORY']!r}")
+          code_ref = env["CODE_REF"]
+          if not re.fullmatch(r"[A-Za-z0-9._/-]+", code_ref):
+              err(f"code_ref has invalid characters: {code_ref!r}")
+
+          allowed_labels = {"self-hosted", "linux", "amd64-large", "arm64-large"}
+          try:
+              runs_on = json.loads(env["RUNS_ON"])
+          except json.JSONDecodeError as e:
+              runs_on = None
+              err(f"runs_on is not valid JSON: {e}")
+          if runs_on is not None:
+              if not (isinstance(runs_on, list) and runs_on and all(isinstance(x, str) for x in runs_on)):
+                  err("runs_on must be a non-empty JSON array of strings")
+              elif "self-hosted" not in runs_on or not set(runs_on) <= allowed_labels:
+                  err(f"runs_on labels not allowed: {runs_on!r} (allowed: {sorted(allowed_labels)})")
+
+          bools = ("run_tests", "increment", "put_build_results_to_cache", "collect_coredumps")
+          ints = ("fetch_depth", "test_threads", "link_threads")
+          required = bools + ints + (
+              "build_target", "build_preset", "test_size",
+              "custom_branch_name",
+          )
+          optional = ("test_type", "test_retry_count", "additional_ya_make_args")
+
+          try:
+              data = json.loads(env["JOB_INPUTS"])
+          except json.JSONDecodeError as e:
+              data = None
+              err(f"job_inputs is not valid JSON: {e}")
+          out = {}
+          if data is not None and not isinstance(data, dict):
+              err("job_inputs must be a JSON object")
+          elif data is not None:
+              unknown = sorted(set(data) - set(required) - set(optional))
+              if unknown:
+                  err(f"job_inputs unknown keys: {', '.join(unknown)}")
+              for k in required + optional:
+                  v = data.get(k)
+                  if v is None:
+                      v = ""
+                  if isinstance(v, bool):
+                      v = "true" if v else "false"
+                  if not isinstance(v, str):
+                      err(f"job_inputs.{k} must be string or bool")
+                      continue
+                  if "\n" in v or "\r" in v:
+                      err(f"job_inputs.{k} must be single-line")
+                  out[k] = v
+              for k in required:
+                  if k in out and not out[k].strip():
+                      err(f"job_inputs.{k} is required")
+              for k in bools:
+                  if out.get(k) and out[k] not in ("true", "false"):
+                      err(f"job_inputs.{k} must be true/false, got {out[k]!r}")
+              for k in ints + ("test_retry_count",):
+                  if out.get(k) and not re.fullmatch(r"[0-9]+", out[k]):
+                      err(f"job_inputs.{k} must be digits, got {out[k]!r}")
+
+          if errors:
+              for e in errors:
+                  print(f"::error::{e}")
+              sys.exit(1)
+
+          out["runs_on"] = json.dumps(runs_on, separators=(",", ":"))
+          out["code_ref"] = code_ref
+          with open(env["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
+              for k, v in out.items():
+                  f.write(f"{k}={v}\n")
+          print(json.dumps(out, ensure_ascii=False, indent=2))
+          PY
+
       - name: Checkout host CI helpers
         uses: actions/checkout@v5
         with:
           sparse-checkout: |
             .github/actions/s3cmd
           sparse-checkout-cone-mode: false
+
+      - name: Install s3cmd
+        shell: bash
+        run: pipx install s3cmd
 
       - name: Configure host s3cmd
         uses: ./.github/actions/s3cmd
@@ -67,137 +190,33 @@ jobs:
           s3_region: ${{ vars.AWS_REGION }}
           public_acl: 'false'
 
-      - name: Parse job_inputs
-        id: ya
-        env:
-          JOB_INPUTS: ${{ inputs.job_inputs }}
-          PLATFORM_RUN_ID: ${{ inputs.platform_run_id }}
-        shell: bash
-        run: |
-          python3 - <<'PY'
-          import json, os, sys, uuid
-
-          raw = os.environ.get("JOB_INPUTS") or "{}"
-          try:
-              data = json.loads(raw)
-          except json.JSONDecodeError as e:
-              print(f"::error::job_inputs is not valid JSON: {e}")
-              sys.exit(1)
-          if not isinstance(data, dict):
-              print("::error::job_inputs must be a JSON object")
-              sys.exit(1)
-
-          def as_str(key, default=""):
-              if key not in data or data[key] is None:
-                  return default
-              v = data[key]
-              if isinstance(v, bool):
-                  return "true" if v else "false"
-              return str(v)
-
-          defaults = {
-              "build_target": "ydb/",
-              "build_preset": "relwithdebinfo",
-              "run_tests": "true",
-              "increment": "false",
-              "fetch_depth": "2",
-              "test_size": "small,medium",
-              "test_type": "",
-              "test_threads": "64",
-              "link_threads": "2",
-              "test_retry_count": "",
-              "additional_ya_make_args": "",
-              "put_build_results_to_cache": "true",
-              "collect_coredumps": "false",
-              "custom_branch_name": "",
-              "pull_number": "",
-              "add_vcs_info": "false",
-              "analytics_job_name": "",
-              "source_event_name": "",
-              "source_run_id": "",
-          }
-          out = {k: as_str(k, d) for k, d in defaults.items()}
-          if out["increment"].lower() in ("1", "true", "yes"):
-              out["fetch_depth"] = "0"
-
-          missing = [
-              k for k in ("custom_branch_name", "analytics_job_name", "source_run_id")
-              if not out[k].strip()
-          ]
-          if missing:
-              print(f"::error::job_inputs missing required fields: {', '.join(missing)}")
-              sys.exit(1)
-
-          platform_run_id = (os.environ.get("PLATFORM_RUN_ID") or "").strip()
-          if platform_run_id and out["source_run_id"] != platform_run_id:
-              print(
-                  f"::error::job_inputs.source_run_id={out['source_run_id']!r} "
-                  f"!= platform_run_id={platform_run_id!r}"
-              )
-              sys.exit(1)
-
-          raw_bl = data.get("blacklist_paths") or ""
-          if isinstance(raw_bl, list):
-              bl_paths = [str(p).strip() for p in raw_bl if str(p).strip()]
-          else:
-              bl_paths = [
-                  p.strip()
-                  for p in str(raw_bl).replace(",", "\n").splitlines()
-                  if p.strip()
-              ]
-          out["blacklist_file"] = ""
-          if bl_paths:
-              bl_path = os.path.join(os.environ.get("RUNNER_TEMP", "/tmp"), "test_blacklist.yaml")
-              with open(bl_path, "w", encoding="utf-8") as bf:
-                  for p in bl_paths:
-                      bf.write(f"- path: {json.dumps(p)}\n")
-              out["blacklist_file"] = bl_path
-              print(f"blacklist_file={bl_path} paths={bl_paths}")
-
-          path = os.environ["GITHUB_OUTPUT"]
-          with open(path, "a", encoding="utf-8") as f:
-              for k, v in out.items():
-                  if "\n" in v or "\r" in v:
-                      delim = f"ghadelimiter_{uuid.uuid4().hex}"
-                      f.write(f"{k}<<{delim}\n{v}\n{delim}\n")
-                  else:
-                      f.write(f"{k}={v}\n")
-          print(json.dumps(out, ensure_ascii=False, indent=2))
-          PY
-
       - name: Publish claim for platform waiter
-        id: claim
         env:
           PLATFORM_RUN_ID: ${{ inputs.platform_run_id }}
           PLATFORM_RUN_ATTEMPT: ${{ inputs.platform_run_attempt }}
           PLATFORM_REPOSITORY: ${{ inputs.platform_repository }}
           CLAIM_BUCKET: ${{ vars.AWS_BUCKET }}
-          S3_PUBLIC_ACL_FLAG: ${{ env.S3_PUBLIC_ACL_FLAG }}
         shell: bash
         run: |
           set -euo pipefail
-          if [ -z "${PLATFORM_RUN_ID}" ]; then
-            echo "::error::platform_run_id is required"
-            exit 1
-          fi
           python3 - <<'PY'
           import json, os, subprocess, tempfile
           from datetime import datetime, timezone
           from pathlib import Path
 
           platform_run_id = os.environ["PLATFORM_RUN_ID"]
-          attempt = (os.environ.get("PLATFORM_RUN_ATTEMPT") or "1").strip() or "1"
+          attempt = os.environ["PLATFORM_RUN_ATTEMPT"]
           bucket = os.environ["CLAIM_BUCKET"]
           run_id = os.environ["GITHUB_RUN_ID"]
           repo = os.environ["GITHUB_REPOSITORY"]
-          server = os.environ.get("GITHUB_SERVER_URL", "https://github.com")
+          server = os.environ["GITHUB_SERVER_URL"]
           acl = (os.environ.get("S3_PUBLIC_ACL_FLAG") or "").strip()
           claim = {
               "version": 1,
               "status": "dispatched",
               "platform_run_id": platform_run_id,
               "platform_run_attempt": attempt,
-              "platform_repository": os.environ.get("PLATFORM_REPOSITORY") or "",
+              "platform_repository": os.environ["PLATFORM_REPOSITORY"],
               "executor_run_id": run_id,
               "executor_run_url": f"{server}/{repo}/actions/runs/{run_id}",
               "executor_repository": repo,
@@ -220,74 +239,41 @@ jobs:
           print(f"::notice title=Claim published::s3://{bucket}/{key} attempt={attempt}")
           PY
 
-      - name: Resolve code_ref
-        id: ref
-        env:
-          CODE_REF: ${{ inputs.code_ref }}
-          PLATFORM_RUN_ID: ${{ inputs.platform_run_id }}
-          PLATFORM_REPOSITORY: ${{ inputs.platform_repository }}
-          PLATFORM_RUN_ATTEMPT: ${{ inputs.platform_run_attempt }}
-          CUSTOM_BRANCH_NAME: ${{ steps.ya.outputs.custom_branch_name }}
-          ANALYTICS_JOB_NAME: ${{ steps.ya.outputs.analytics_job_name }}
-          PULL_NUMBER: ${{ steps.ya.outputs.pull_number }}
-          SOURCE_EVENT_NAME: ${{ steps.ya.outputs.source_event_name }}
-          SOURCE_RUN_ID: ${{ steps.ya.outputs.source_run_id }}
-          BUILD_PRESET: ${{ steps.ya.outputs.build_preset }}
-          BUILD_TARGET: ${{ steps.ya.outputs.build_target }}
-          RUNS_ON: ${{ inputs.runs_on }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          code_ref="${CODE_REF:-main}"
-          if [ -z "$code_ref" ]; then
-            code_ref='main'
-          fi
-          echo "code=$code_ref" >> "$GITHUB_OUTPUT"
-          {
-            echo "### CI remote executor"
-            printf -- '- **platform run:** `%s` (`%s`) attempt `%s`\n' \
-              "$PLATFORM_RUN_ID" "$PLATFORM_REPOSITORY" "${PLATFORM_RUN_ATTEMPT:-1}"
-            printf -- '- **code ref:** `%s`\n' "$code_ref"
-            printf -- '- **analytics branch:** `%s`\n' "$CUSTOM_BRANCH_NAME"
-            printf -- '- **analytics job:** `%s`\n' "$ANALYTICS_JOB_NAME"
-            printf -- '- **pull number:** `%s`\n' "$PULL_NUMBER"
-            printf -- '- **source event:** `%s` / `%s`\n' "$SOURCE_EVENT_NAME" "$SOURCE_RUN_ID"
-            printf -- '- **preset:** `%s`\n' "$BUILD_PRESET"
-            printf -- '- **target:** `%s`\n' "$BUILD_TARGET"
-            printf -- '- **runs_on:** `%s`\n' "$RUNS_ON"
-          } >> "$GITHUB_STEP_SUMMARY"
-
+  execute:
+    name: build_and_test_ya · ${{ needs.claim.outputs.code_ref }}
+    needs: claim
+    runs-on: ${{ fromJSON(needs.claim.outputs.runs_on) }}
+    timeout-minutes: 1440
+    env:
+      PIP_BREAK_SYSTEM_PACKAGES: "1"
+      CI_DISABLE_YDB_QA: "1"
+      CI_REMOTE_EXECUTOR: "1"
+    steps:
       - name: Checkout ydb-platform/ydb
         uses: actions/checkout@v5
         with:
           repository: ydb-platform/ydb
-          ref: ${{ steps.ref.outputs.code }}
-          fetch-depth: ${{ steps.ya.outputs.fetch_depth }}
+          ref: ${{ needs.claim.outputs.code_ref }}
+          fetch-depth: ${{ needs.claim.outputs.fetch_depth }}
           token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN || github.token }}
           persist-credentials: false
 
       - name: Build and test (platform action from checkout)
         uses: ./.github/actions/build_and_test_ya
         with:
-          build_preset: ${{ steps.ya.outputs.build_preset }}
-          build_target: ${{ steps.ya.outputs.build_target }}
-          run_tests: ${{ steps.ya.outputs.run_tests }}
-          increment: ${{ steps.ya.outputs.increment }}
-          test_size: ${{ steps.ya.outputs.test_size }}
-          test_type: ${{ steps.ya.outputs.test_type }}
-          test_threads: ${{ steps.ya.outputs.test_threads }}
-          link_threads: ${{ steps.ya.outputs.link_threads }}
-          test_retry_count: ${{ steps.ya.outputs.test_retry_count }}
-          put_build_results_to_cache: ${{ steps.ya.outputs.put_build_results_to_cache }}
-          collect_coredumps: ${{ steps.ya.outputs.collect_coredumps }}
-          custom_branch_name: ${{ steps.ya.outputs.custom_branch_name }}
-          pull_number: ${{ steps.ya.outputs.pull_number }}
-          add_vcs_info: ${{ steps.ya.outputs.add_vcs_info }}
-          analytics_job_name: ${{ steps.ya.outputs.analytics_job_name }}
-          source_event_name: ${{ steps.ya.outputs.source_event_name }}
-          source_run_id: ${{ steps.ya.outputs.source_run_id }}
-          enable_ydb_qa: false
-          additional_ya_make_args: -DDEBUGINFO_LINES_ONLY ${{ steps.ya.outputs.additional_ya_make_args }} ${{ steps.ya.outputs.blacklist_file && format('--test-blacklist-path {0}', steps.ya.outputs.blacklist_file) || '' }}
+          build_preset: ${{ needs.claim.outputs.build_preset }}
+          build_target: ${{ needs.claim.outputs.build_target }}
+          run_tests: ${{ needs.claim.outputs.run_tests }}
+          increment: ${{ needs.claim.outputs.increment }}
+          test_size: ${{ needs.claim.outputs.test_size }}
+          test_type: ${{ needs.claim.outputs.test_type }}
+          test_threads: ${{ needs.claim.outputs.test_threads }}
+          link_threads: ${{ needs.claim.outputs.link_threads }}
+          test_retry_count: ${{ needs.claim.outputs.test_retry_count }}
+          put_build_results_to_cache: ${{ needs.claim.outputs.put_build_results_to_cache }}
+          collect_coredumps: ${{ needs.claim.outputs.collect_coredumps }}
+          custom_branch_name: ${{ needs.claim.outputs.custom_branch_name }}
+          additional_ya_make_args: -DDEBUGINFO_LINES_ONLY ${{ needs.claim.outputs.additional_ya_make_args }}
           secs: >-
             ${{ format('{{"AWS_KEY_ID":{0},"AWS_KEY_VALUE":{1},"REMOTE_CACHE_USERNAME":{2},"REMOTE_CACHE_PASSWORD":{3},"YDBOT_TELEGRAM_BOT_TOKEN":{4}}}',
               toJSON(secrets.AWS_KEY_ID), toJSON(secrets.AWS_KEY_VALUE),
@@ -298,56 +284,117 @@ jobs:
               toJSON(vars.AWS_BUCKET), toJSON(vars.AWS_ENDPOINT), toJSON(vars.AWS_REGION),
               toJSON(vars.REMOTE_CACHE_URL_YA), toJSON(vars.GH_ALERTS_TG_LOGINS), toJSON(vars.GH_ALERTS_TG_CHAT)) }}
 
-      - name: Publish failed claim
-        # Only when claim was never successfully published (parse/config/claim put failure).
-        # After a good claim the waiter follows the executor run conclusion.
-        if: failure() && steps.claim.outcome != 'success'
-        continue-on-error: true
+      - name: Publish remote artifacts locator
+        if: always()
         env:
-          PLATFORM_RUN_ID: ${{ inputs.platform_run_id }}
-          PLATFORM_RUN_ATTEMPT: ${{ inputs.platform_run_attempt }}
-          PLATFORM_REPOSITORY: ${{ inputs.platform_repository }}
-          CLAIM_BUCKET: ${{ vars.AWS_BUCKET }}
-          S3_PUBLIC_ACL_FLAG: ${{ env.S3_PUBLIC_ACL_FLAG }}
+          S3_KEY_ID: ${{ secrets.AWS_KEY_ID }}
+          S3_KEY_SECRET: ${{ secrets.AWS_KEY_VALUE }}
+          S3_ENDPOINT: ${{ vars.AWS_ENDPOINT }}
+          S3_REGION: ${{ vars.AWS_REGION }}
         shell: bash
         run: |
           set -euo pipefail
+          for v in S3_BUCKET_PATH PUBLIC_DIR_URL ORIGINAL_HEAD; do
+            if [ -z "${!v:-}" ]; then
+              echo "::error::$v missing; cannot publish remote_artifacts.json"
+              exit 1
+            fi
+          done
+          umask 077
+          S3CMD_CONFIG=$(mktemp "${RUNNER_TEMP}/s3cmd.XXXXXX")
+          export S3CMD_CONFIG
+          host="${S3_ENDPOINT#https://}"
+          host="${host#http://}"
+          host="${host%/}"
+          cat <<EOF > "$S3CMD_CONFIG"
+          [default]
+          access_key = ${S3_KEY_ID}
+          secret_key = ${S3_KEY_SECRET}
+          bucket_location = ${S3_REGION:-us-east-1}
+          host_base = ${host}
+          host_bucket = %(bucket)s.${host}
+          EOF
           python3 - <<'PY'
-          import json, os, subprocess, tempfile
-          from datetime import datetime, timezone
-          from pathlib import Path
+          import json, os, subprocess, sys
 
-          platform_run_id = os.environ["PLATFORM_RUN_ID"]
-          attempt = (os.environ.get("PLATFORM_RUN_ATTEMPT") or "1").strip() or "1"
-          bucket = os.environ["CLAIM_BUCKET"]
-          run_id = os.environ["GITHUB_RUN_ID"]
-          repo = os.environ["GITHUB_REPOSITORY"]
-          server = os.environ.get("GITHUB_SERVER_URL", "https://github.com")
-          acl = (os.environ.get("S3_PUBLIC_ACL_FLAG") or "").strip()
-          claim = {
+          def parse_s3cmd_ls_line(line: str):
+              """URI from s3:// to EOL. Keep in sync with platform s3cmd_ls.py."""
+              text = line.strip()
+              marker = "s3://"
+              idx = text.find(marker)
+              if idx < 0:
+                  return None
+              if idx > 0 and not text[idx - 1].isspace():
+                  return None
+              uri = text[idx:]
+              if len(uri) <= len(marker):
+                  return None
+              return uri
+
+          bucket_path = os.environ.get("S3_BUCKET_PATH", "").strip()
+          if not bucket_path:
+              sys.exit("::error::S3_BUCKET_PATH missing; cannot list synced artifacts")
+          if not bucket_path.startswith("s3://"):
+              sys.exit(f"::error::S3_BUCKET_PATH must be s3://...; got {bucket_path!r}")
+          bucket, _, key_prefix = bucket_path[len("s3://"):].partition("/")
+          key_prefix = key_prefix.rstrip("/")
+          run_prefix = "/".join((os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_WORKFLOW"], os.environ["GITHUB_RUN_ID"]))
+          if not key_prefix.startswith(run_prefix + "/"):
+              sys.exit(f"::error::S3_BUCKET_PATH {bucket_path!r} is not under run root {run_prefix!r}")
+
+          config = os.environ.get("S3CMD_CONFIG", "").strip()
+          if not config or not os.path.isfile(config):
+              sys.exit(f"::error::S3CMD_CONFIG {config!r} is not a readable file")
+
+          list_url = f"s3://{bucket}/{key_prefix}/"
+          ls_cmd = ["s3cmd", "--config", config, "ls", "-r", list_url]
+          print("+", " ".join(ls_cmd), flush=True)
+          proc = subprocess.run(ls_cmd, capture_output=True, text=True)
+          if proc.returncode != 0:
+              print(proc.stdout, end="")
+              print(proc.stderr, end="", file=sys.stderr)
+              sys.exit(f"::error::s3cmd ls failed ({proc.returncode}) for {list_url}")
+
+          prefix = f"{key_prefix}/"
+          files: list[str] = []
+          for line in proc.stdout.splitlines():
+              s3_uri = parse_s3cmd_ls_line(line)
+              if not s3_uri:
+                  continue
+              _, _, key = s3_uri[len("s3://"):].partition("/")
+              if not key.startswith(prefix):
+                  print(f"::warning::skipping key outside artifact prefix: {key}", file=sys.stderr)
+                  continue
+              rel = key[len(prefix):]
+              if not rel or rel.endswith("/"):
+                  continue
+              if rel.startswith("/") or "\\" in rel or ".." in rel.split("/"):
+                  print(f"::warning::skipping unsafe relative path {rel!r}", file=sys.stderr)
+                  continue
+              files.append(rel)
+          files = sorted(set(files))
+
+          if not files:
+              sys.exit(f"::error::no objects under {list_url}; refusing empty remote_artifacts manifest")
+
+          meta = {
               "version": 1,
-              "status": "failed",
-              "error": "executor failed before claim was published",
-              "platform_run_id": platform_run_id,
-              "platform_run_attempt": attempt,
-              "platform_repository": os.environ.get("PLATFORM_REPOSITORY") or "",
-              "executor_run_id": run_id,
-              "executor_run_url": f"{server}/{repo}/actions/runs/{run_id}",
-              "executor_repository": repo,
-              "claimed_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+              "artifact_key_prefix": key_prefix,
+              "public_dir_url": os.environ["PUBLIC_DIR_URL"].rstrip("/"),
+              "commit": os.environ["ORIGINAL_HEAD"],
+              "files": files,
           }
-          key = f"remote-claims/{platform_run_id}.json"
-          with tempfile.TemporaryDirectory() as tmp:
-              path = Path(tmp) / "claim.json"
-              path.write_text(json.dumps(claim, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-              cmd = [
-                  "s3cmd", "put", "--no-progress",
-                  "--no-mime-magic", "--guess-mime-type",
-                  str(path), f"s3://{bucket}/{key}",
-              ]
-              if acl:
-                  cmd.insert(2, acl)
-              print("+", " ".join(cmd), flush=True)
-              subprocess.check_call(cmd)
-          print(json.dumps(claim, indent=2))
+          out = os.path.join(os.environ["RUNNER_TEMP"], "remote_artifacts.json")
+          with open(out, "w", encoding="utf-8") as f:
+              json.dump(meta, f, ensure_ascii=False, indent=2)
+              f.write("\n")
+          print(json.dumps(meta, ensure_ascii=False, indent=2))
+          url = f"s3://{bucket}/{run_prefix}/remote_artifacts.json"
+          cmd = ["s3cmd", "--config", config, "put", "--no-progress", "--no-mime-magic", "--guess-mime-type", out, url]
+          acl = (os.environ.get("S3_PUBLIC_ACL_FLAG") or "").strip()
+          if acl:
+              cmd.insert(3, acl)
+          print("+", " ".join(cmd), flush=True)
+          subprocess.check_call(cmd)
+          print(f"::notice title=Remote artifacts::{url}")
           PY
