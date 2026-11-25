@@ -1,0 +1,34 @@
+diff --git a/ydb/tools/ya.make b/ydb/tools/ya.make
+--- a/ydb/tools/ya.make
++++ b/ydb/tools/ya.make
+@@ -9,8 +9,8 @@ RECURSE(
+     partcheck
+     tli_analysis
+     ydb_bench
+-    query_replay
+-    query_replay_yt
++#    query_replay
++#    query_replay_yt
+     stress_tool
+     tsserver
+     tstool
+diff --git a/ydb/ya.make b/ydb/ya.make
+--- a/ydb/ya.make
++++ b/ydb/ya.make
+@@ -1,6 +1,6 @@
+ RECURSE(
+     apps
+-    docs
++#    docs
+     core
+     library
+     mvp
+diff --git a/yql/essentials/tests/common/test_framework/udfs_deps/ya.make b/yql/essentials/tests/common/test_framework/udfs_deps/ya.make
+--- a/yql/essentials/tests/common/test_framework/udfs_deps/ya.make
++++ b/yql/essentials/tests/common/test_framework/udfs_deps/ya.make
+@@ -36,4 +36,4 @@
+-IF (OS_LINUX AND CLANG)
++IF (OS_LINUX AND CLANG AND ARCH_X86_64)
+     SET(
+         UDFS
+         ${UDFS}

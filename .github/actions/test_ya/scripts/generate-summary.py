@@ -5,6 +5,7 @@ import dataclasses
 import json
 import math
 import os
+import re
 from enum import Enum
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -88,7 +89,35 @@ def safe_link(url):
     return url if urlsplit(url).scheme in ('', 'http', 'https', 'file') else ''
 
 
-def render_testlist_html(tests, filename, build_preset, branch, pr_number=None, workflow_run_id=None):
+def ya_execution_notes(log_path):
+    if log_path is None:
+        return []
+    suites = not_launched = None
+    in_test_totals = False
+    with log_path.open(encoding='utf-8', errors='replace') as log:
+        for raw in log:
+            line = raw.strip()
+            match = re.match(r'Number of suites skipped due to a failed build: (\d+)\b', line)
+            if match:
+                suites = int(match[1])
+            if re.fullmatch(r'Total \d+ tests:?', line):
+                in_test_totals = line.endswith(':')
+                not_launched = 0
+            elif in_test_totals:
+                count = re.fullmatch(r'(\d+) - ([A-Z_]+)', line)
+                if not count:
+                    in_test_totals = False
+                elif count[2] == 'NOT_LAUNCHED':
+                    not_launched = int(count[1])
+    notes = []
+    if suites is not None:
+        notes.append(f'Test suites not run due to build errors: {suites}.')
+    if not_launched is not None:
+        notes.append(f'Test cases reported as NOT_LAUNCHED: {not_launched}.')
+    return notes
+
+
+def render_testlist_html(tests, filename, build_preset, branch, pr_number=None, workflow_run_id=None, execution_notes=()):
     env = Environment(loader=FileSystemLoader(Path(__file__).parent / 'templates'),
                       undefined=StrictUndefined, autoescape=True)
     env.filters['safe_link'] = safe_link
@@ -100,6 +129,7 @@ def render_testlist_html(tests, filename, build_preset, branch, pr_number=None, 
     run_repo = os.environ.get('GITHUB_REPOSITORY', source_repo)
     content = env.get_template('summary.html').render(
         status_order=order, tests=groups, build_preset=build_preset, branch=branch,
+        execution_notes=execution_notes,
         pr_url=f'{server}/{source_repo}/pull/{pr_number}' if pr_number else None,
         workflow_url=f'{server}/{run_repo}/actions/runs/{workflow_run_id}' if workflow_run_id else None,
         commit_sha=os.environ.get('GITHUB_HEAD_SHA', ''),
@@ -123,11 +153,13 @@ def main():
     parser.add_argument('--pr_number', type=int)
     parser.add_argument('--workflow_run_id')
     parser.add_argument('--build_failed', action='store_true')
+    parser.add_argument('--ya-output', type=Path, help='Console log for this build attempt')
     parser.add_argument('args', nargs='+', metavar='TITLE html_out report_path')
     args = parser.parse_args()
     if len(args.args) % 3:
         parser.error('Expected TITLE html_out report_path triples')
-    body = []
+    execution_notes = ya_execution_notes(args.ya_output)
+    body = [f'- {note}' for note in execution_notes] + ([''] if execution_notes else [])
     total_tests = 0
     failed = args.build_failed
     for index in range(0, len(args.args), 3):
@@ -143,7 +175,8 @@ def main():
             html_path = Path(args.public_dir) / html_path
         html_path.parent.mkdir(parents=True, exist_ok=True)
         report_url = args.public_dir_url.rstrip('/') + '/' + html_path.relative_to(args.public_dir).as_posix()
-        render_testlist_html(tests, html_path, args.build_preset, args.branch, args.pr_number, args.workflow_run_id)
+        render_testlist_html(tests, html_path, args.build_preset, args.branch, args.pr_number,
+                             args.workflow_run_id, execution_notes=execution_notes)
         summary = TestSummary(tests, report_url, bool(args.is_retry))
         failed |= summary.is_failed and not args.is_test_result_ignored
         body += [f'#### {title}', ''] + summary.render() + ['']

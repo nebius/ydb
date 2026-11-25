@@ -21,6 +21,11 @@ a { margin-right: .5rem; }
 {% if workflow_url %}<a href="{{ workflow_url }}">Workflow run</a>{% endif %}
 {% for status in status_order %}<a href="#{{ status.name }}">{{ status.name }} ({{ tests[status]|length }})</a>{% endfor %}
 </nav>
+{% if execution_notes %}
+<ul>
+{% for note in execution_notes %}<li>{{ note }}</li>{% endfor %}
+</ul>
+{% endif %}
 {% for status in status_order %}
 <section id="{{ status.name }}">
 <h2 class="{{ status.name }}">{{ status.name }} ({{ tests[status]|length }})</h2>

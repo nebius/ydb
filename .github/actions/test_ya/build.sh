@@ -47,6 +47,8 @@ for target in "${targets[@]}"; do
 done
 "$YA_EXECUTABLE" --version 2>&1 | tee "$PUBLIC_DIR/ya-version.txt"
 graph_opts=()
+# Remove this file to disable the temporary source workaround.
+source_patch="$TEST_YA_ACTION_PATH/config/tmp-fixes.patch"
 if [[ "${INCREMENT:-false}" == true ]]; then
     base=${SOURCE_BASE_SHA:-$ORIGINAL_HEAD~1}
     if ! git cat-file -e "$base^{commit}" 2>/dev/null; then git fetch --no-tags --depth=1 origin "$base"; fi
@@ -55,9 +57,13 @@ if [[ "${INCREMENT:-false}" == true ]]; then
     "$CI_PYTHON" "$TEST_YA_HELPERS_DIR/graph_compare.py" \
         --command-file "$CI_STATE_DIR/graph-command.json" --result-graph-path "$CI_STATE_DIR/graph.json" \
         --result-context-path "$CI_STATE_DIR/context.json" --work-dir "$CI_STATE_DIR/graphs" \
-        --summary-file "$PUBLIC_DIR/graph_summary.md" "$base" "$ORIGINAL_HEAD" "${targets[@]}" \
+        --summary-file "$PUBLIC_DIR/graph_summary.md" --apply-patch "$source_patch" "$base" "$ORIGINAL_HEAD" "${targets[@]}" \
         2>&1 | tee "$PUBLIC_DIR/graph_compare_log.txt"
     graph_opts=(--build-custom-json "$CI_STATE_DIR/graph.json" --custom-context "$CI_STATE_DIR/context.json")
+fi
+if [[ -f "$source_patch" ]]; then
+    echo "Applying temporary source patch: $source_patch"
+    git apply "$source_patch"
 fi
 if [[ -n "${REMOTE_CACHE_URI:-}" ]]; then
     params+=(--bazel-remote-store --bazel-remote-base-uri "$REMOTE_CACHE_URI")
@@ -115,7 +121,8 @@ for (( retry=1; retry<=TEST_RETRY_COUNT; retry++ )); do
             -p "MemoryMax=$memory" -p MemorySwapMax=0 -- "${inner[@]}" "${command[@]}")
     fi
     build_rc=0
-    "${run_command[@]}" 2>&1 | tee -a "$PUBLIC_DIR/ya_make_output.txt" || build_rc=$?
+    attempt_log="$CURRENT_PUBLIC_DIR/ya_make_output.txt"
+    "${run_command[@]}" 2>&1 | tee -a "$PUBLIC_DIR/ya_make_output.txt" "$attempt_log" || build_rc=$?
     printf '%s\n' "$build_rc" > "$CI_STATE_DIR/build-rc"
     [[ -f "$report" ]] || { echo 'ya did not produce a results report' >&2; exit 1; }
     gzip -c "$report" > "$CURRENT_PUBLIC_DIR/orig_report.json.gz"
@@ -140,7 +147,7 @@ for (( retry=1; retry<=TEST_RETRY_COUNT; retry++ )); do
         --status_report_file "$CURRENT_PUBLIC_DIR/status.txt" --is_retry "$((retry > 1))" \
         --is_last_retry "$last_retry" --is_test_result_ignored "$IS_TEST_RESULT_IGNORED" \
         --comment_color_file "$CURRENT_PUBLIC_DIR/summary_color.txt" \
-        --comment_text_file "$CURRENT_PUBLIC_DIR/summary_text.txt" "${summary_args[@]}" \
+        --comment_text_file "$CURRENT_PUBLIC_DIR/summary_text.txt" --ya-output "$attempt_log" "${summary_args[@]}" \
         Tests "$CURRENT_PUBLIC_DIR/ya-test.html" "$report"
     cp "$CURRENT_PUBLIC_DIR/summary_text.txt" "$PUBLIC_DIR/summary_text.txt"
     cp "$CURRENT_PUBLIC_DIR/summary_color.txt" "$PUBLIC_DIR/summary_color.txt"

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Upstream graph_compare algorithm with argv-safe execution and checkout restoration."""
 import argparse
+from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
@@ -17,6 +18,18 @@ def run(command, tool=False):
     subprocess.run(command, check=True, env=env)
 
 
+@contextmanager
+def patched_source(patch):
+    if patch is None or not patch.is_file():
+        yield
+        return
+    run(['git', 'apply', str(patch)])
+    try:
+        yield
+    finally:
+        run(['git', 'apply', '--reverse', str(patch)])
+
+
 def node_count(filename):
     graph = json.loads(Path(filename).read_text())
     return len(graph['graph'])
@@ -29,6 +42,7 @@ def main():
     parser.add_argument('--result-context-path', required=True)
     parser.add_argument('--summary-file', required=True)
     parser.add_argument('--work-dir', required=True)
+    parser.add_argument('--apply-patch', type=Path)
     parser.add_argument('base_commit')
     parser.add_argument('head_commit')
     parser.add_argument('targets', nargs='+')
@@ -40,8 +54,9 @@ def main():
         try:
             for name, sha in (('base', args.base_commit), ('head', args.head_commit)):
                 run(['git', 'checkout', '--detach', sha])
-                run(command + args.targets + ['--cache-tests', '--save-graph-to', f'{workdir}/graph_{name}.json',
-                                              '--save-context-to', f'{workdir}/context_{name}.json'])
+                with patched_source(args.apply_patch):
+                    run(command + args.targets + ['--cache-tests', '--save-graph-to', f'{workdir}/graph_{name}.json',
+                                                  '--save-context-to', f'{workdir}/context_{name}.json'])
             run([command[0], 'tool', 'ygdiff', '--old', f'{workdir}/graph_base.json',
                  '--new', f'{workdir}/graph_head.json', '--cut', args.result_graph_path,
                  '--dump-uids', f'{workdir}/uids.json'], tool=True)

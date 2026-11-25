@@ -25,6 +25,22 @@ on:
         description: Run only tests affected by graph changes
         type: boolean
         default: false
+      test_sizes:
+        description: Test sizes to run
+        type: choice
+        default: small,medium
+        options:
+          - small
+          - medium
+          - large
+          - small,medium
+          - small,large
+          - medium,large
+          - small,medium,large
+      keep_going:
+        description: Continue independent build tasks after an error (ya make -k)
+        type: boolean
+        default: false
       put_to_cache:
         description: Upload build results to remote cache
         type: boolean
@@ -90,4 +106,6 @@ jobs:
       x86: ${{ inputs.x86 }}
       arm64: ${{ inputs.arm64 }}
       incremental: ${{ inputs.incremental }}
+      test_sizes: ${{ inputs.test_sizes }}
+      keep_going: ${{ inputs.keep_going }}
       put_to_cache: ${{ inputs.put_to_cache }}
